@@ -1,6 +1,6 @@
 # Production image. Git is installed because BehindGit runs real git commands.
 # Digest pinned so a retagged node:22-bookworm-slim cannot change the build.
-FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
+FROM node:26-bookworm-slim@sha256:bc0a2afd3b74ce12222fc8bab99271e66257f021078f5f4a5d687a77d280c1d9
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates tini \
