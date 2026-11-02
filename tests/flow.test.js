@@ -177,6 +177,7 @@ test('reset --soft, --mixed, and --hard leave different index and worktree state
     result = await executeGit(session.repo, 'git commit -m "Add notes again"');
     assert.equal(result.exitCode, 0, result.stderr);
     const again = await captureSnapshot(session.repo);
+    assert.notEqual(again.head.oid, soft.head.oid);
     result = await executeGit(session.repo, 'git reset --mixed HEAD~1');
     assert.equal(result.exitCode, 0, result.stderr);
     const mixed = await captureSnapshot(session.repo);

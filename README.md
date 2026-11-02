@@ -30,9 +30,40 @@ Open http://localhost:8080.
 
 ```bash
 npm test
+npm run lint
 ```
 
-The tests cover the command allowlist (including shell-metacharacter rejection), snapshot parsing, before/after diffs, and a full moon session: edit, `git add`, `git commit`, branch, `git merge --no-ff`, sandbox reset, and `git reset --soft`, `--mixed`, and `--hard`.
+The tests cover the command allowlist (including shell-metacharacter rejection), snapshot parsing, before/after diffs, and a full moon session: edit, `git add`, `git commit`, branch, `git merge --no-ff`, sandbox reset, and `git reset --soft`, `--mixed`, and `--hard`. ESLint covers `server/`, `public/`, and `tests/`.
+
+## Docker
+
+The production image is `ghcr.io/biswajitind/behindgit`. It is based on `node:22-bookworm-slim`, installs Git (the app runs real `git`), installs production dependencies, then removes the global `npm` CLI because the server never calls it. The process runs as the image’s `node` user.
+
+```bash
+docker build -t behindgit .
+docker run --rm -p 8080:8080 behindgit
+```
+
+The image label `org.opencontainers.image.source` is `https://github.com/biswajitind/behindgit`, which links the GitHub Container Registry package to this repository.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main` or `master`. The repository’s default branch is `main`; `master` is included so a rename does not silently drop the workflow. Check jobs:
+
+| Job | What fails the build |
+| --- | --- |
+| npm audit | `npm audit --audit-level=high`. High and critical advisories fail. Moderate and low are reported and do not fail the job. The current moderate findings are in the ESLint toolchain (`minimatch`), not in the production dependency tree. `npm ci --omit=dev` inside the image reports none. |
+| ESLint | `npm run lint` |
+| Tests | `npm test` |
+| CodeQL | JavaScript analysis. Results upload to the repository’s code scanning alerts. |
+| Trivy | The production image, severity `HIGH,CRITICAL`, `ignore-unfixed: true`. A finding fails the job only when it is high or critical and a fixed version exists. OS packages and the app’s `node_modules` are in scope. Unfixed issues are shown and do not fail the job. |
+
+The publish job runs only after those jobs pass, and only on a push to the default branch (never on a pull request). It logs in to `ghcr.io` with `GITHUB_TOKEN` and pushes `ghcr.io/biswajitind/behindgit:latest` plus a short commit SHA tag. GitHub creates the package on the first successful push. No separate “create the package” step is required.
+
+### One-time steps for the repository owner
+
+1. **Actions workflow permissions.** In the repository, open Settings → Actions → General → Workflow permissions. Choose **Read and write permissions** so a job can request `packages: write` (image push) and `security-events: write` (CodeQL upload). If this stays at “Read repository contents and packages permissions”, the workflow’s write requests are ignored and publish or CodeQL upload will fail. Fork pull requests do not receive these write permissions; that is expected.
+2. **Package visibility.** A new GHCR package is **private** by default. After the first push to the default branch, open the package (linked from the repository’s Packages section) and change the visibility if the image should be public. The source label is what associates the package with this repository so it inherits access from the repo.
 
 ## Sample repository
 

@@ -52,8 +52,6 @@ export function runGit(repo, args, options = {}) {
 
     const out = [];
     const err = [];
-    let outLen = 0;
-    let errLen = 0;
     let truncatedOut = false;
     let truncatedErr = false;
     let killed = false;
@@ -90,12 +88,10 @@ export function runGit(repo, args, options = {}) {
 
     child.stdout.on('data', (chunk) => {
       take(chunk, out, outRef, outMark);
-      outLen = outRef.value;
       truncatedOut = outMark.value;
     });
     child.stderr.on('data', (chunk) => {
       take(chunk, err, errRef, errMark);
-      errLen = errRef.value;
       truncatedErr = errMark.value;
     });
 

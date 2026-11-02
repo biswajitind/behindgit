@@ -67,7 +67,6 @@ async function api(path, options = {}) {
 }
 
 function emptyChanges() {
-  const none = { added: [], removed: [], modified: [] };
   return {
     head: { changed: false, before: null, after: null },
     refs: { added: [], removed: [], modified: [] },
@@ -635,7 +634,7 @@ function renderDiffs() {
     button.classList.toggle('on', button.dataset.side === state.diffSide);
   });
   const snapshot = view[state.diffSide] || view.after;
-  let html = '';
+  let html;
   if (state.diffTab === 'worktree') html = renderPatch(snapshot.patches?.worktreeVsIndex);
   else if (state.diffTab === 'index') html = renderPatch(snapshot.patches?.indexVsHead);
   else if (state.diffTab === 'commit') html = renderCommitDiff(view);
