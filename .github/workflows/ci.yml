@@ -63,7 +63,12 @@ jobs:
     container: node:20-bullseye
     steps:
       - name: Install Git before checkout
-        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+        run: |
+          if ! command -v git >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y --no-install-recommends git ca-certificates
+          fi
+          git --version
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm ci
       - run: npm test

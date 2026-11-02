@@ -33,7 +33,7 @@ npm test
 npm run lint
 ```
 
-The tests cover the command allowlist (including shell-metacharacter rejection and pathspec magic), snapshot parsing, topological commit order, before/after diffs, session limits, and a full moon session: edit, `git add`, `git commit`, branch, `git merge --no-ff`, sandbox reset, and `git reset --soft`, `--mixed`, and `--hard`. ESLint covers `server/`, `public/`, and `tests/`. The test script quotes its glob so Node expands it; a shell glob is not required.
+The tests cover the command allowlist (including shell-metacharacter rejection and pathspec magic), snapshot parsing, topological commit order, before/after diffs, session limits, and a full moon session: edit, `git add`, `git commit`, branch, `git merge --no-ff`, sandbox reset, and `git reset --soft`, `--mixed`, and `--hard`. ESLint covers `server/`, `public/`, and `tests/`. The test script lists `tests/*.test.js` in process, so it does not depend on a shell glob or on Node’s own glob expansion (Node 20 does not expand a quoted pattern).
 
 ## Docker
 
