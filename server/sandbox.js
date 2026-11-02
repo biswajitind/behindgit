@@ -191,6 +191,10 @@ async function materialize(sample, repo) {
   } else if (sample.kind === 'url') {
     await gitText(null, ['clone', '--quiet', sample.url, repo], { timeout: cfg.cloneTimeoutMs });
   } else {
+    const sourceFormat = await gitText(sample.path, ['rev-parse', '--show-object-format'], { allowNonZero: true });
+    if (sourceFormat.exitCode === 0 && sourceFormat.stdout.trim() !== 'sha1') {
+      throw new AppError(`Only SHA-1 repositories are supported (this sample is ${sourceFormat.stdout.trim()})`, 500);
+    }
     await gitText(null, ['clone', '--no-local', '--no-hardlinks', '--quiet', sample.path, repo], {
       timeout: cfg.cloneTimeoutMs,
     });
