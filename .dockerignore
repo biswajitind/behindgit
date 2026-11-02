@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+tests
+*.md
+.sandboxes
+npm-debug.log*
+coverage
+.env
+.env.*
+eslint.config.js

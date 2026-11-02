@@ -1,0 +1,23 @@
+{
+  "name": "behindgit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interactive visualization of what Git commands do to the working tree, index, and object store.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "lint": "eslint .",
+    "test": "node scripts/run-tests.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0"
+  }
+}

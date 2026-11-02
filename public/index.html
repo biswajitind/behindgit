@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BehindGit</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">Bg</span>
+        <div>
+          <h1>Behind<span>Git</span></h1>
+          <p>Working tree, index, and object store — before and after.</p>
+        </div>
+      </div>
+      <div class="top-meta">
+        <div class="sample">
+          <span class="kicker">Sample</span>
+          <strong id="sample-label">moon</strong>
+          <a id="upstream" href="https://github.com/biswajitind/moon" target="_blank" rel="noreferrer">github.com/biswajitind/moon</a>
+        </div>
+        <div id="head-chip" class="head-chip">HEAD</div>
+        <button id="reset-btn" type="button">Reset sandbox</button>
+      </div>
+    </header>
+
+    <form id="command-form" class="command-bar">
+      <label class="cmd-label" for="command-input">Git command</label>
+      <input id="command-input" name="command" autocomplete="off" spellcheck="false" placeholder='git commit -m "Fix Greeter import"' aria-label="Git command">
+      <button id="run-btn" type="submit">Run</button>
+    </form>
+
+    <section class="summary-bar">
+      <div>
+        <p id="command-line" class="command-line">Starting a sandbox…</p>
+        <p id="summary" class="summary" aria-live="polite"></p>
+      </div>
+      <div id="chips" class="chips"></div>
+    </section>
+
+    <div id="pane-toggle" class="pane-toggle" role="group" aria-label="Which column to show on a narrow screen">
+      <button type="button" data-pane="before" aria-pressed="false">Before</button>
+      <button type="button" data-pane="after" aria-pressed="true">After</button>
+    </div>
+
+    <div id="workspace" class="workspace show-after">
+      <aside class="side">
+        <section>
+          <h2>Try this on moon</h2>
+          <p class="hint">The sample test imports <code>hello_oop</code>, but the class lives in <code>main.py</code>. Fix that, commit it, then branch and merge.</p>
+          <div class="suggest-row">
+            <button type="button" data-suggest="test_main.py">Fix import in test_main.py</button>
+            <button type="button" data-suggest="main.py">Personalize greeting in main.py</button>
+          </div>
+        </section>
+        <section>
+          <h2>Commands</h2>
+          <div id="presets" class="presets"></div>
+        </section>
+        <section class="editor-block">
+          <div class="editor-head">
+            <h2>Working tree file</h2>
+            <span id="editor-state" class="editor-state"></span>
+          </div>
+          <div id="file-list" class="file-list"></div>
+          <div class="new-file">
+            <input id="new-path" aria-label="New file path" placeholder="notes.txt" spellcheck="false">
+            <button id="new-file-btn" type="button">New</button>
+          </div>
+          <textarea id="editor" aria-label="File contents" spellcheck="false"></textarea>
+          <div class="editor-actions">
+            <button id="save-btn" type="button">Save to working tree</button>
+            <button id="discard-btn" type="button">Discard</button>
+            <button id="delete-btn" type="button">Delete</button>
+          </div>
+        </section>
+        <section>
+          <h2>Command output</h2>
+          <pre id="console" class="console">Git stdout and stderr land here. Commands run as an argument list, not a shell.</pre>
+        </section>
+      </aside>
+      <section id="before" class="pane before" aria-label="State before the command"></section>
+      <section id="after" class="pane after" aria-label="State after the command"></section>
+    </div>
+
+    <section class="diffs" aria-label="Diffs">
+      <div class="diff-bar">
+        <div id="diff-tabs" class="diff-tabs" role="tablist" aria-label="Diff kind"></div>
+        <div class="diff-side" role="group" aria-label="Which snapshot’s repository diffs to show">
+          <button type="button" data-side="before" aria-pressed="false">Before</button>
+          <button type="button" data-side="after" class="on" aria-pressed="true">After</button>
+        </div>
+      </div>
+      <div id="diff-body" class="diff-body" role="tabpanel"></div>
+    </section>
+  </div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
