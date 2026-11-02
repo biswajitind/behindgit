@@ -1,0 +1,140 @@
+import { spawn } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { AppError } from './errors.js';
+import { getConfig } from './config.js';
+
+const privateHome = path.join(os.tmpdir(), 'behindgit-git-home');
+mkdirSync(privateHome, { recursive: true });
+
+export function gitEnv() {
+  const cfg = getConfig();
+  return {
+    PATH: process.env.PATH || '/usr/bin:/bin',
+    HOME: privateHome,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_EDITOR: 'true',
+    GIT_SEQUENCE_EDITOR: 'true',
+    GIT_PAGER: 'cat',
+    GIT_AUTHOR_NAME: cfg.authorName,
+    GIT_AUTHOR_EMAIL: cfg.authorEmail,
+    GIT_COMMITTER_NAME: cfg.authorName,
+    GIT_COMMITTER_EMAIL: cfg.authorEmail,
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+  };
+}
+
+// shell is intentionally omitted (spawn default is false). Callers pass argv arrays only.
+export function runGit(repo, args, options = {}) {
+  const cfg = getConfig();
+  const {
+    stdin = null,
+    timeout = cfg.commandTimeoutMs,
+    allowNonZero = false,
+    maxOutput = 20_000_000,
+    allowTruncate = false,
+  } = options;
+
+  const gitArgs = ['--no-pager', '-c', 'core.hooksPath=/dev/null'];
+  if (repo) gitArgs.push('-C', repo);
+  gitArgs.push(...args);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', gitArgs, {
+      env: gitEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    const out = [];
+    const err = [];
+    let outLen = 0;
+    let errLen = 0;
+    let truncatedOut = false;
+    let truncatedErr = false;
+    let killed = false;
+    let settled = false;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill('SIGKILL');
+    }, timeout);
+
+    const take = (chunk, bucket, lenRef, mark) => {
+      const next = lenRef.value + chunk.length;
+      if (next <= maxOutput) {
+        bucket.push(chunk);
+      } else if (!mark.value) {
+        mark.value = true;
+        const keep = maxOutput - lenRef.value;
+        if (keep > 0) bucket.push(chunk.subarray(0, keep));
+      }
+      lenRef.value = next;
+    };
+
+    const outRef = { value: 0 };
+    const errRef = { value: 0 };
+    const outMark = { value: false };
+    const errMark = { value: false };
+
+    child.stdout.on('data', (chunk) => {
+      take(chunk, out, outRef, outMark);
+      outLen = outRef.value;
+      truncatedOut = outMark.value;
+    });
+    child.stderr.on('data', (chunk) => {
+      take(chunk, err, errRef, errMark);
+      errLen = errRef.value;
+      truncatedErr = errMark.value;
+    });
+
+    child.on('error', (error) => {
+      finish(reject, new AppError(`Failed to run git: ${error.message}`, 500));
+    });
+
+    child.on('close', (code) => {
+      if (killed) {
+        finish(reject, new AppError('Git command timed out', 408));
+        return;
+      }
+      if ((truncatedOut || truncatedErr) && !allowTruncate) {
+        finish(reject, new AppError('Git output exceeded the capture limit', 500));
+        return;
+      }
+      let stdout = Buffer.concat(out);
+      let stderr = Buffer.concat(err);
+      if (truncatedOut) stdout = Buffer.concat([stdout, Buffer.from('\n… output truncated\n')]);
+      if (truncatedErr) stderr = Buffer.concat([stderr, Buffer.from('\n… output truncated\n')]);
+      const result = { exitCode: code ?? 1, stdout, stderr };
+      if (code !== 0 && !allowNonZero) {
+        const message = stderr.toString('utf8').trim() || stdout.toString('utf8').trim() || `git exited ${code}`;
+        finish(reject, new AppError(message.slice(0, 2000), 500));
+        return;
+      }
+      finish(resolve, result);
+    });
+
+    if (stdin) child.stdin.end(stdin);
+    else child.stdin.end();
+  });
+}
+
+export async function gitText(repo, args, options) {
+  const result = await runGit(repo, args, options);
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString('utf8'),
+    stderr: result.stderr.toString('utf8'),
+  };
+}

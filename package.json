@@ -1,0 +1,17 @@
+{
+  "name": "behindgit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interactive visualization of what Git commands do to the working tree, index, and object store.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
