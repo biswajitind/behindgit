@@ -30,6 +30,7 @@ export function getConfig() {
     commandTimeoutMs: intEnv('BEHINDGIT_COMMAND_TIMEOUT_MS', 15_000),
     cloneTimeoutMs: intEnv('BEHINDGIT_CLONE_TIMEOUT_MS', 60_000),
     maxSessions: intEnv('BEHINDGIT_MAX_SESSIONS', 30),
+    maxSessionsPerClient: intEnv('BEHINDGIT_MAX_SESSIONS_PER_CLIENT', 3),
     maxBlobBytes: intEnv('BEHINDGIT_MAX_BLOB_BYTES', 100_000),
     maxObjects: intEnv('BEHINDGIT_MAX_OBJECTS', 2500),
     maxFiles: intEnv('BEHINDGIT_MAX_FILES', 2000),
@@ -38,9 +39,16 @@ export function getConfig() {
     maxCloneConcurrency: intEnv('BEHINDGIT_MAX_CLONE_CONCURRENCY', 2),
     sessionMaxFiles: intEnv('BEHINDGIT_SESSION_MAX_FILES', 200),
     sessionMaxBytes: intEnv('BEHINDGIT_SESSION_MAX_BYTES', 5_000_000),
+    sessionMaxGitBytes: intEnv('BEHINDGIT_SESSION_MAX_GIT_BYTES', 32_000_000),
+    maxObjectBytes: intEnv('BEHINDGIT_MAX_OBJECT_BYTES', 8_000_000),
     requestDeadlineMs: intEnv('BEHINDGIT_REQUEST_DEADLINE_MS', 60_000),
     rateCreatePerMin: intEnv('BEHINDGIT_RATE_CREATE_PER_MIN', 10),
     rateCommandPerMin: intEnv('BEHINDGIT_RATE_COMMAND_PER_MIN', 60),
+    rateReadPerMin: intEnv('BEHINDGIT_RATE_READ_PER_MIN', 60),
+    // Off unless a trusted reverse proxy sets X-Forwarded-For. Otherwise the
+    // limiter uses the socket address, which is the client when the process
+    // is reached directly (the default bind is loopback).
+    trustProxy: process.env.BEHINDGIT_TRUST_PROXY === '1',
     queueLimit: intEnv('BEHINDGIT_QUEUE_LIMIT', 5),
     authorName: 'BehindGit Learner',
     authorEmail: 'learner@behindgit.local',

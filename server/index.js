@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createApp } from './app.js';
 import { getConfig } from './config.js';
+import { killGitChildren } from './git.js';
+import { sweepRateLimits } from './httpguard.js';
 import { cleanupOldSandboxes } from './sandbox.js';
 
 try {
@@ -14,6 +16,7 @@ const cfg = getConfig();
 await cleanupOldSandboxes();
 
 const timer = setInterval(() => {
+  sweepRateLimits();
   cleanupOldSandboxes().catch((error) => {
     console.error('Sandbox cleanup failed:', error.message);
   });
@@ -27,6 +30,7 @@ const server = app.listen(cfg.port, cfg.host, () => {
 });
 
 function shutdown() {
+  killGitChildren();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
 }

@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { createApp } from '../server/app.js';
 import { getConfig } from '../server/config.js';
+import { rateKey, rateLimit, sweepRateLimits } from '../server/httpguard.js';
+import { createSession, getSession } from '../server/sandbox.js';
 
 const sandboxRoot = mkdtempSync(path.join(os.tmpdir(), 'behindgit-guards-'));
 process.env.BEHINDGIT_SANDBOX_ROOT = sandboxRoot;
@@ -147,6 +149,62 @@ test('create is rate limited, and a live session is not evicted to make room', {
   }
 });
 
+});
+
+test('one address cannot hold more than its session cap', async () => {
+  process.env.BEHINDGIT_MAX_SESSIONS = '10';
+  process.env.BEHINDGIT_MAX_SESSIONS_PER_CLIENT = '2';
+  const first = await createSession({ clientKey: 'alpha' });
+  const second = await createSession({ clientKey: 'alpha' });
+  const third = await createSession({ clientKey: 'alpha' });
+  await assert.rejects(() => Promise.resolve().then(() => getSession(first.id)), /not found/);
+  assert.equal(getSession(second.id).id, second.id);
+  assert.equal(getSession(third.id).id, third.id);
+  const other = await createSession({ clientKey: 'beta' });
+  assert.equal(getSession(other.id).id, other.id);
+});
+
+test('rate keys use an IPv6 /64 and empty buckets are dropped', () => {
+  assert.equal(rateKey('2001:db8:1:2:3:4:5:6'), '2001:db8:1:2');
+  assert.equal(rateKey('2001:db8:1:2::8'), '2001:db8:1:2');
+  assert.equal(rateKey('::ffff:10.1.2.3'), '10.1.2.3');
+  const req = { socket: { remoteAddress: '198.51.100.10' }, ip: '198.51.100.10' };
+  const res = { setHeader() {} };
+  process.env.BEHINDGIT_RATE_READ_PER_MIN = '1';
+  const limit = rateLimit('read');
+  let blocked = 0;
+  limit(req, res, (error) => { if (error) blocked += 1; });
+  limit(req, res, (error) => { if (error) blocked += 1; });
+  assert.equal(blocked, 1);
+  sweepRateLimits(Date.now() + 120_000);
+  blocked = 0;
+  limit(req, res, (error) => { if (error) blocked += 1; });
+  assert.equal(blocked, 0);
+  delete process.env.BEHINDGIT_RATE_READ_PER_MIN;
+});
+
+test('a command is refused when the object store is over its cap', async () => {
+  process.env.BEHINDGIT_RATE_CREATE_PER_MIN = '1000';
+  process.env.BEHINDGIT_MAX_SESSIONS = '10';
+  process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES = '1';
+  const { server, port } = await listen(createApp());
+  try {
+    const created = await request(port, '/api/sessions', {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: '{}',
+    });
+    assert.equal(created.status, 201);
+    const command = await request(port, `/api/sessions/${created.body.id}/command`, {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ command: 'git status' }),
+    });
+    assert.equal(command.status, 413);
+  } finally {
+    delete process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES;
+    server.close();
+  }
 });
 
 test.after(() => {

@@ -100,6 +100,7 @@ Other knobs, all read on each request:
 | `BEHINDGIT_SANDBOX_TTL_MS` | two hours | Delete a session that has been idle this long. |
 | `BEHINDGIT_IDLE_EVICT_MS` | 10 minutes | When the session cap is hit, only sessions idle at least this long can be evicted. A busier server returns 503 with `Retry-After` instead of dropping a live session. |
 | `BEHINDGIT_MAX_SESSIONS` | 30 | Cap on live sandboxes, including a create that has reserved a slot but not finished cloning. |
+| `BEHINDGIT_MAX_SESSIONS_PER_CLIENT` | 3 | Sandboxes one client address may hold. A further create drops that client's own least-recently-used sandbox instead of filling the server. |
 | `BEHINDGIT_MAX_CLONE_CONCURRENCY` | 2 | How many sample clones run at once. |
 | `BEHINDGIT_CLONE_TIMEOUT_MS` | 60 seconds | Timeout for materializing the sample. |
 | `BEHINDGIT_COMMAND_TIMEOUT_MS` | 15 seconds | Timeout for one Git command. |
@@ -107,10 +108,14 @@ Other knobs, all read on each request:
 | `BEHINDGIT_QUEUE_LIMIT` | 5 | Queued commands per session. Further commands get 429. |
 | `BEHINDGIT_RATE_CREATE_PER_MIN` | 10 | New sandboxes per client address per minute. |
 | `BEHINDGIT_RATE_COMMAND_PER_MIN` | 60 | Commands and file writes per client address per minute. |
+| `BEHINDGIT_RATE_READ_PER_MIN` | 60 | Snapshot reads per client address per minute. |
+| `BEHINDGIT_TRUST_PROXY` | unset | Set to `1` only behind a reverse proxy you trust to set `X-Forwarded-For`. Otherwise the limit uses the socket address, so the process should be reached directly. IPv6 keys are the /64. |
 | `BEHINDGIT_SESSION_MAX_FILES` | 200 | Worktree files in one session. |
-| `BEHINDGIT_SESSION_MAX_BYTES` | 5000000 | Worktree bytes in one session. |
+| `BEHINDGIT_SESSION_MAX_BYTES` | 5000000 | Worktree bytes in one session. `.git` is not included. |
+| `BEHINDGIT_SESSION_MAX_GIT_BYTES` | 32000000 | Bytes in the session `.git` directory. A command is refused with 413 once the object store is already over this. |
 | `BEHINDGIT_MAX_BLOB_BYTES` | 100000 | Blobs larger than this are described (`size`, `truncated`) and not loaded. |
 | `BEHINDGIT_MAX_OBJECTS` | 2500 | Object-store cap. Past it, the snapshot keeps reachable objects first and sets `objectsTruncated` so the diff does not pretend the rest were deleted. |
+| `BEHINDGIT_MAX_OBJECT_BYTES` | 8000000 | Bytes of object content loaded for one snapshot. Past it, further objects stay metadata and `objectsTruncated` is set. A failed object read does the same, so it is not shown as deletions. |
 | `BEHINDGIT_MAX_FILES` | 2000 | Worktree walk cap. The walk stops instead of continuing through the rest of the tree. |
 
 **Reset sandbox** throws away the session directory and clones the sample again.
