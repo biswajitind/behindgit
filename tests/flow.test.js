@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createApp } from '../server/app.js';
 import { executeGit } from '../server/commands.js';
 import { diffSnapshots } from '../server/diff.js';
-import { createSession } from '../server/sandbox.js';
+import { createSession, deleteWorktreeFile, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
 import { captureSnapshot } from '../server/snapshot.js';
 
 const sandboxRoot = mkdtempSync(path.join(os.tmpdir(), 'behindgit-flow-'));
@@ -196,6 +196,25 @@ test('reset --soft, --mixed, and --hard leave different index and worktree state
     assert.ok(!hardNotes || hardNotes.missing);
     assert.equal(hard.index.some((entry) => entry.path === 'notes.txt'), false);
     assert.equal(hard.head.oid, soft.head.oid);
+  } finally {
+    await rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('worktree writes stay inside the sandbox', async () => {
+  const session = await createSession();
+  const outside = path.join(session.dir, 'outside.txt');
+  try {
+    await assert.rejects(() => resolveInside(session.repo, '../outside.txt'), /not allowed/);
+    await assert.rejects(() => writeWorktreeFile(session, '../outside.txt', 'nope'), /not allowed/);
+    await symlink(outside, path.join(session.repo, 'linked'));
+    await assert.rejects(() => writeWorktreeFile(session, 'linked', 'nope'), /symlink/);
+    await assert.rejects(() => deleteWorktreeFile(session, 'linked'), /symlink/);
+    assert.equal(existsSync(outside), false);
+    await writeWorktreeFile(session, 'notes/a.txt', 'hi\n');
+    assert.equal(existsSync(path.join(session.repo, 'notes', 'a.txt')), true);
+    await deleteWorktreeFile(session, 'notes/a.txt');
+    assert.equal(existsSync(path.join(session.repo, 'notes', 'a.txt')), false);
   } finally {
     await rm(session.dir, { recursive: true, force: true });
   }

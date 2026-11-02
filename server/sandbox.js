@@ -170,22 +170,30 @@ export async function rebuildRepo(session) {
   return session;
 }
 
+function escapesRoot(root, full) {
+  const relative = path.relative(root, full);
+  return relative === '' || relative === '..' || relative.startsWith('..' + path.sep);
+}
+
 export async function resolveInside(repo, rel) {
   if (typeof rel !== 'string' || !rel.trim()) throw new AppError('Path is required');
-  const normalized = rel.replace(/\\/g, '/').replace(/^\/+/, '');
-  const safe = assertSafePath(normalized);
+  const safe = assertSafePath(rel.replace(/\\/g, '/').replace(/^\/+/, ''));
   if (safe === '.') throw new AppError('Path must be a file');
   const root = path.resolve(repo);
   const full = path.resolve(root, safe);
-  const rootWith = root.endsWith(path.sep) ? root : root + path.sep;
-  if (full !== root && !full.startsWith(rootWith)) throw new AppError('Path escapes the sandbox');
-  let current = root;
+  if (escapesRoot(root, full)) throw new AppError('Path escapes the sandbox');
+  let cursor = root;
   for (const part of safe.split('/')) {
-    current = path.join(current, part);
+    cursor = path.resolve(cursor, part);
+    const relative = path.relative(root, cursor);
+    if (relative.startsWith('..' + path.sep) || relative === '..' || relative === '') {
+      throw new AppError('Path escapes the sandbox');
+    }
     try {
-      const st = await lstat(current);
+      const st = await lstat(cursor);
       if (st.isSymbolicLink()) throw new AppError('Refusing to follow a symlink');
     } catch (error) {
+      if (error instanceof AppError) throw error;
       if (error.code === 'ENOENT') return full;
       throw error;
     }
@@ -194,13 +202,32 @@ export async function resolveInside(repo, rel) {
 }
 
 export async function writeWorktreeFile(session, rel, content) {
+  const root = path.resolve(session.repo);
   const full = await resolveInside(session.repo, rel);
-  await mkdir(path.dirname(full), { recursive: true });
+  const relative = path.relative(root, full);
+  if (relative.startsWith('..' + path.sep) || relative === '..' || relative === '') {
+    throw new AppError('Path escapes the sandbox');
+  }
+  const dir = path.resolve(path.dirname(full));
+  if (dir === root) {
+    await mkdir(root, { recursive: true });
+  } else {
+    const dirRelative = path.relative(root, dir);
+    if (dirRelative.startsWith('..' + path.sep) || dirRelative === '..' || dirRelative === '') {
+      throw new AppError('Path escapes the sandbox');
+    }
+    await mkdir(dir, { recursive: true });
+  }
   await writeFile(full, content, 'utf8');
 }
 
 export async function deleteWorktreeFile(session, rel) {
+  const root = path.resolve(session.repo);
   const full = await resolveInside(session.repo, rel);
+  const relative = path.relative(root, full);
+  if (relative.startsWith('..' + path.sep) || relative === '..' || relative === '') {
+    throw new AppError('Path escapes the sandbox');
+  }
   let st;
   try {
     st = await lstat(full);
