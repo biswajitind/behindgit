@@ -3,8 +3,12 @@ function computeReachable(snapshot) {
   const trees = new Map(snapshot.objects.trees.map((obj) => [obj.oid, obj]));
   const seen = new Set();
   const stack = [];
+  const tags = new Map((snapshot.objects.tags || []).map((obj) => [obj.oid, obj]));
   if (snapshot.head?.oid) stack.push(snapshot.head.oid);
-  for (const ref of snapshot.refs || []) stack.push(ref.oid);
+  for (const ref of snapshot.refs || []) {
+    stack.push(ref.oid);
+    if (ref.peeled) stack.push(ref.peeled);
+  }
   for (const entry of snapshot.index || []) stack.push(entry.oid);
 
   while (stack.length) {
@@ -20,14 +24,22 @@ function computeReachable(snapshot) {
     const tree = trees.get(oid);
     if (tree) {
       for (const entry of tree.entries || []) stack.push(entry.oid);
+      continue;
     }
+    const tag = tags.get(oid);
+    if (tag?.object) stack.push(tag.object);
   }
   return seen;
 }
 
 export function markReachable(snapshot) {
   const reachable = computeReachable(snapshot);
-  for (const group of [snapshot.objects.commits, snapshot.objects.trees, snapshot.objects.blobs]) {
+  for (const group of [
+    snapshot.objects.commits,
+    snapshot.objects.trees,
+    snapshot.objects.blobs,
+    snapshot.objects.tags || [],
+  ]) {
     for (const obj of group) obj.reachable = reachable.has(obj.oid);
   }
   return reachable;
@@ -135,11 +147,13 @@ function diffReachability(before, after) {
     ...before.objects.commits.map((obj) => obj.oid),
     ...before.objects.trees.map((obj) => obj.oid),
     ...before.objects.blobs.map((obj) => obj.oid),
+    ...(before.objects.tags || []).map((obj) => obj.oid),
   ]);
   const afterIds = new Set([
     ...after.objects.commits.map((obj) => obj.oid),
     ...after.objects.trees.map((obj) => obj.oid),
     ...after.objects.blobs.map((obj) => obj.oid),
+    ...(after.objects.tags || []).map((obj) => obj.oid),
   ]);
   const gained = [];
   const lost = [];
@@ -162,16 +176,22 @@ export function diffSnapshots(before, after) {
       || before.head?.name !== after.head?.name
       || Boolean(before.head?.detached) !== Boolean(after.head?.detached),
   };
+  const objects = {
+    commits: diffOids(before.objects.commits, after.objects.commits),
+    trees: diffOids(before.objects.trees, after.objects.trees),
+    blobs: diffOids(before.objects.blobs, after.objects.blobs),
+  };
+  if (before.objectsTruncated || after.objectsTruncated) {
+    objects.commits.removed = [];
+    objects.trees.removed = [];
+    objects.blobs.removed = [];
+  }
   return {
     head,
     refs: diffRefs(before.refs || [], after.refs || []),
     worktree: diffFiles(before.worktree || [], after.worktree || []),
     index: diffIndex(before.index || [], after.index || []),
-    objects: {
-      commits: diffOids(before.objects.commits, after.objects.commits),
-      trees: diffOids(before.objects.trees, after.objects.trees),
-      blobs: diffOids(before.objects.blobs, after.objects.blobs),
-    },
+    objects,
     reachability: diffReachability(before, after),
   };
 }

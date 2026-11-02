@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import os from 'node:os';
@@ -5,10 +6,17 @@ import path from 'node:path';
 import { AppError } from './errors.js';
 import { getConfig } from './config.js';
 
+export const requestContext = new AsyncLocalStorage();
+
 const privateHome = path.join(os.tmpdir(), 'behindgit-git-home');
 mkdirSync(privateHome, { recursive: true });
 
-export function gitEnv() {
+function redact(text) {
+  const root = getConfig().sandboxRoot;
+  return String(text).split(root).join('[sandbox]');
+}
+
+export function gitEnv(extra = {}) {
   const cfg = getConfig();
   return {
     PATH: process.env.PATH || '/usr/bin:/bin',
@@ -24,9 +32,26 @@ export function gitEnv() {
     GIT_AUTHOR_EMAIL: cfg.authorEmail,
     GIT_COMMITTER_NAME: cfg.authorName,
     GIT_COMMITTER_EMAIL: cfg.authorEmail,
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_ALLOW_PROTOCOL: 'file:https',
+    GIT_CEILING_DIRECTORIES: cfg.sandboxRoot,
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
+    ...extra,
   };
+}
+
+function killGroup(child) {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // The process has already exited.
+    }
+  }
 }
 
 // shell is intentionally omitted (spawn default is false). Callers pass argv arrays only.
@@ -34,20 +59,42 @@ export function runGit(repo, args, options = {}) {
   const cfg = getConfig();
   const {
     stdin = null,
-    timeout = cfg.commandTimeoutMs,
     allowNonZero = false,
     maxOutput = 20_000_000,
     allowTruncate = false,
+    env: extraEnv = {},
   } = options;
+  let timeout = options.timeout ?? cfg.commandTimeoutMs;
 
-  const gitArgs = ['--no-pager', '-c', 'core.hooksPath=/dev/null'];
+  const deadlineAt = requestContext.getStore()?.deadlineAt;
+  if (deadlineAt) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) return Promise.reject(new AppError('Request deadline exceeded', 408));
+    timeout = Math.min(timeout, remaining);
+  }
+
+  const gitArgs = [
+    '--no-pager',
+    '-c', 'core.hooksPath=/dev/null',
+    '-c', 'core.fsmonitor=false',
+    '-c', 'core.quotePath=false',
+    '-c', 'gc.auto=0',
+    '-c', 'maintenance.auto=false',
+  ];
   if (repo) gitArgs.push('-C', repo);
   gitArgs.push(...args);
 
+  const env = gitEnv(extraEnv);
+  if (repo) {
+    env.GIT_DIR = path.join(repo, '.git');
+    env.GIT_WORK_TREE = repo;
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn('git', gitArgs, {
-      env: gitEnv(),
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
     });
 
     const out = [];
@@ -66,7 +113,7 @@ export function runGit(repo, args, options = {}) {
 
     const timer = setTimeout(() => {
       killed = true;
-      child.kill('SIGKILL');
+      killGroup(child);
     }, timeout);
 
     const take = (chunk, bucket, lenRef, mark) => {
@@ -114,7 +161,7 @@ export function runGit(repo, args, options = {}) {
       if (truncatedErr) stderr = Buffer.concat([stderr, Buffer.from('\n… output truncated\n')]);
       const result = { exitCode: code ?? 1, stdout, stderr };
       if (code !== 0 && !allowNonZero) {
-        const message = stderr.toString('utf8').trim() || stdout.toString('utf8').trim() || `git exited ${code}`;
+        const message = redact(stderr.toString('utf8').trim() || stdout.toString('utf8').trim() || `git exited ${code}`);
         finish(reject, new AppError(message.slice(0, 2000), 500));
         return;
       }

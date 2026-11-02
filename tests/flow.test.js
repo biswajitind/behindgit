@@ -7,11 +7,13 @@ import test from 'node:test';
 import { createApp } from '../server/app.js';
 import { executeGit } from '../server/commands.js';
 import { diffSnapshots } from '../server/diff.js';
-import { createSession, deleteWorktreeFile, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
+import { createSession, deleteWorktreeFile, escapesRoot, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
 import { captureSnapshot } from '../server/snapshot.js';
 
 const sandboxRoot = mkdtempSync(path.join(os.tmpdir(), 'behindgit-flow-'));
 process.env.BEHINDGIT_SANDBOX_ROOT = sandboxRoot;
+process.env.BEHINDGIT_RATE_CREATE_PER_MIN = '1000';
+process.env.BEHINDGIT_RATE_COMMAND_PER_MIN = '1000';
 
 async function listen(app) {
   const server = app.listen(0, '127.0.0.1');
@@ -23,7 +25,11 @@ async function listen(app) {
 async function json(port, urlPath, options = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${urlPath}`, {
     ...options,
-    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+    headers: {
+      'content-type': 'application/json',
+      'x-behindgit': '1',
+      ...(options.headers || {}),
+    },
   });
   const body = await response.json();
   return { status: response.status, body };
@@ -201,16 +207,35 @@ test('reset --soft, --mixed, and --hard leave different index and worktree state
   }
 });
 
+test('containment rejects paths outside the root, including a sibling prefix', () => {
+  const root = path.join(os.tmpdir(), 'behindgit-root');
+  assert.equal(escapesRoot(root, path.join(root, '..', 'x')), true);
+  assert.equal(escapesRoot(root, path.resolve(root, '..')), true);
+  assert.equal(escapesRoot(root, root), true);
+  assert.equal(escapesRoot(root, `${root}-evil${path.sep}x`), true);
+  assert.equal(escapesRoot(root, path.join(root, 'a', 'b')), false);
+});
+
 test('worktree writes stay inside the sandbox', async () => {
   const session = await createSession();
   const outside = path.join(session.dir, 'outside.txt');
+  const outsideDir = path.join(session.dir, 'outside-dir');
   try {
     await assert.rejects(() => resolveInside(session.repo, '../outside.txt'), /not allowed/);
     await assert.rejects(() => writeWorktreeFile(session, '../outside.txt', 'nope'), /not allowed/);
+    await assert.rejects(() => writeWorktreeFile(session, '/etc/passwd', 'nope'), /Absolute paths/);
+    await assert.rejects(() => writeWorktreeFile(session, 'a/../b', 'nope'), /not allowed/);
+    await assert.rejects(() => resolveInside(session.repo, '.GIT/config'), /not allowed/);
+    assert.equal(existsSync(path.join(session.repo, 'etc', 'passwd')), false);
     await symlink(outside, path.join(session.repo, 'linked'));
     await assert.rejects(() => writeWorktreeFile(session, 'linked', 'nope'), /symlink/);
     await assert.rejects(() => deleteWorktreeFile(session, 'linked'), /symlink/);
     assert.equal(existsSync(outside), false);
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(outsideDir);
+    await symlink(outsideDir, path.join(session.repo, 'linked-dir'));
+    await assert.rejects(() => writeWorktreeFile(session, 'linked-dir/pwn.txt', 'nope'), /symlink/);
+    assert.equal(existsSync(path.join(outsideDir, 'pwn.txt')), false);
     await writeWorktreeFile(session, 'notes/a.txt', 'hi\n');
     assert.equal(existsSync(path.join(session.repo, 'notes', 'a.txt')), true);
     await deleteWorktreeFile(session, 'notes/a.txt');

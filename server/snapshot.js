@@ -15,6 +15,7 @@ const STATUS_LABELS = {
   ' D': 'deleted',
   'D ': 'staged delete',
   MD: 'staged+deleted',
+  '!!': 'ignored',
   UU: 'conflict',
   AA: 'conflict',
   DD: 'conflict',
@@ -77,14 +78,10 @@ export function parseCommitText(content) {
       index += 1;
       break;
     }
-    if (line.startsWith('gpgsig ')) {
-      const signature = [line.slice('gpgsig '.length)];
+    if ((line.startsWith(' ') || line.startsWith('\t')) && headers.length) {
+      const last = headers[headers.length - 1];
+      last[1] = `${last[1]}\n${line.slice(1)}`;
       index += 1;
-      while (index < lines.length && (lines[index].startsWith(' ') || lines[index].startsWith('\t'))) {
-        signature.push(lines[index].slice(1));
-        index += 1;
-      }
-      headers.push(['gpgsig', signature.join('\n')]);
       continue;
     }
     const space = line.indexOf(' ');
@@ -105,7 +102,8 @@ export function parseCommitText(content) {
     author: ident(headers.find(([key]) => key === 'author')?.[1]),
     committer: ident(headers.find(([key]) => key === 'committer')?.[1]),
     message,
-    signed: headers.some(([key]) => key === 'gpgsig'),
+    signed: headers.some(([key]) => key === 'gpgsig' || key === 'gpgsig-sha256'),
+    encoding: headers.find(([key]) => key === 'encoding')?.[1] ?? null,
   };
 }
 
@@ -123,6 +121,7 @@ export function parseTreeBuffer(buf) {
     if (oidBuf.length < 20) break;
     let type = 'blob';
     if (mode === '40000' || mode === '040000') type = 'tree';
+    else if (mode === '120000') type = 'symlink';
     else if (mode === '160000') type = 'commit';
     entries.push({
       mode: mode.padStart(6, '0'),
@@ -187,10 +186,8 @@ async function readHead(repo) {
   const detached = symbolic.exitCode !== 0;
   const oid = parsed.exitCode === 0 ? parsed.stdout.trim() : null;
   let name = 'HEAD';
-  if (!detached) {
-    const abbrev = await gitText(repo, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowNonZero: true });
-    if (abbrev.exitCode === 0 && abbrev.stdout.trim()) name = abbrev.stdout.trim();
-  }
+  const short = await gitText(repo, ['symbolic-ref', '--short', '-q', 'HEAD'], { allowNonZero: true });
+  if (short.exitCode === 0 && short.stdout.trim()) name = short.stdout.trim();
   return {
     name,
     oid,
@@ -203,14 +200,14 @@ async function readHead(repo) {
 async function readRefs(repo) {
   const result = await gitText(
     repo,
-    ['for-each-ref', '--format=%(objectname)%00%(objecttype)%00%(refname)%00%(HEAD)'],
+    ['for-each-ref', '--format=%(objectname)%00%(objecttype)%00%(refname)%00%(HEAD)%00%(*objectname)%00%(*objecttype)'],
     { allowNonZero: true },
   );
   if (result.exitCode !== 0) return [];
   const refs = [];
   for (const line of result.stdout.split('\n')) {
     if (!line.trim()) continue;
-    const [oid, type, name, headMark] = line.split('\0');
+    const [oid, type, name, headMark, peeled, peeledType] = line.split('\0');
     if (!name?.startsWith('refs/')) continue;
     let kind = 'other';
     if (name.startsWith('refs/heads/')) kind = 'branch';
@@ -227,6 +224,8 @@ async function readRefs(repo) {
       objectType: type,
       kind,
       current: headMark === '*',
+      peeled: peeled || null,
+      peeledType: peeledType || null,
     });
   }
   refs.sort((a, b) => a.name.localeCompare(b.name));
@@ -266,10 +265,15 @@ async function walkWorktree(repo, maxFiles) {
   const files = [];
   let truncated = false;
   async function walk(dir) {
+    if (truncated) return;
     const entries = await readdir(dir, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.name === '.git') continue;
+      if (truncated || files.length >= maxFiles) {
+        truncated = true;
+        return;
+      }
       const full = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) {
         const target = await readlink(full);
@@ -278,13 +282,10 @@ async function walkWorktree(repo, maxFiles) {
       }
       if (entry.isDirectory()) {
         await walk(full);
+        if (truncated) return;
         continue;
       }
       if (!entry.isFile()) continue;
-      if (files.length >= maxFiles) {
-        truncated = true;
-        return;
-      }
       const st = await lstat(full);
       files.push({
         full,
@@ -411,37 +412,20 @@ async function catBatch(repo, oids) {
   return parseCatFileBatch(result.stdout);
 }
 
-function orderCommits(commits, refs, headOid) {
-  const byId = new Map(commits.map((commit) => [commit.oid, commit]));
-  const seen = new Set();
-  const ordered = [];
-  const queue = [];
-  if (headOid && byId.has(headOid)) queue.push(headOid);
-  for (const ref of refs) {
-    if (byId.has(ref.oid)) queue.push(ref.oid);
-  }
-  while (queue.length) {
-    const oid = queue.shift();
-    if (!oid || seen.has(oid)) continue;
-    const commit = byId.get(oid);
-    if (!commit) continue;
-    seen.add(oid);
-    ordered.push(commit);
-    for (const parent of commit.parents) queue.push(parent);
-  }
-  const rest = commits.filter((commit) => !seen.has(commit.oid));
-  rest.sort((a, b) => (b.committer?.time || 0) - (a.committer?.time || 0));
-  return ordered.concat(rest);
-}
-
 function stripLeadingOid(text, oid) {
   const lines = text.split('\n');
   if (lines[0] && lines[0].trim() === oid) return lines.slice(1).join('\n').replace(/^\n/, '');
   return text;
 }
 
+const patchCache = new Map();
+
 async function attachPatches(repo, commits) {
   await mapPool(commits, 6, async (commit) => {
+    if (patchCache.has(commit.oid)) {
+      commit.patches = patchCache.get(commit.oid);
+      return;
+    }
     const patches = [];
     if (!/^[0-9a-f]{40}$/i.test(commit.oid)) {
       commit.patches = patches;
@@ -466,38 +450,130 @@ async function attachPatches(repo, commits) {
       }
     }
     commit.patches = patches;
+    if (patchCache.size > 500) {
+      const oldest = patchCache.keys().next().value;
+      patchCache.delete(oldest);
+    }
+    patchCache.set(commit.oid, patches);
   });
 }
 
-export async function captureSnapshot(repo) {
+async function orderFromGit(repo, commits) {
+  const result = await gitText(repo, ['rev-list', '--topo-order', '--all'], {
+    allowNonZero: true,
+    maxOutput: 2_000_000,
+    allowTruncate: true,
+  });
+  const rank = new Map();
+  result.stdout.split('\n').filter(Boolean).forEach((oid, index) => rank.set(oid, index));
+  const reachable = [];
+  const rest = [];
+  for (const commit of commits) {
+    if (rank.has(commit.oid)) reachable.push(commit);
+    else rest.push(commit);
+  }
+  reachable.sort((a, b) => rank.get(a.oid) - rank.get(b.oid));
+  rest.sort((a, b) => (b.committer?.time || 0) - (a.committer?.time || 0));
+  return reachable.concat(rest);
+}
+
+function parseTagText(content) {
+  const lines = content.split('\n');
+  let index = 0;
+  const headers = [];
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line === '') {
+      index += 1;
+      break;
+    }
+    if ((line.startsWith(' ') || line.startsWith('\t')) && headers.length) {
+      const last = headers[headers.length - 1];
+      last[1] = `${last[1]}\n${line.slice(1)}`;
+      index += 1;
+      continue;
+    }
+    const space = line.indexOf(' ');
+    if (space === -1) headers.push([line, '']);
+    else headers.push([line.slice(0, space), line.slice(space + 1)]);
+    index += 1;
+  }
+  let message = lines.slice(index).join('\n');
+  if (message.endsWith('\n')) message = message.slice(0, -1);
+  return {
+    object: headers.find(([key]) => key === 'object')?.[1] ?? null,
+    objectType: headers.find(([key]) => key === 'type')?.[1] ?? null,
+    name: headers.find(([key]) => key === 'tag')?.[1] ?? null,
+    message: message.slice(0, 4000),
+  };
+}
+
+export async function captureSnapshot(repo, hints = {}) {
   const cfg = getConfig();
+  const warnings = [];
   const [head, refs, index, statusResult] = await Promise.all([
     readHead(repo),
     readRefs(repo),
     readIndex(repo),
-    gitText(repo, ['status', '--porcelain=v1', '-uall', '-z'], { allowNonZero: true }),
+    gitText(repo, ['status', '--porcelain=v1', '-uall', '--ignored=matching', '-z'], { allowNonZero: true }),
   ]);
   const statusEntries = statusResult.exitCode === 0 ? parsePorcelain(statusResult.stdout) : [];
   const worktreeResult = await readWorktree(repo, statusEntries);
 
-  let listed = await listObjects(repo);
+  let listed = [];
+  try {
+    listed = await listObjects(repo);
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : 'Could not list objects');
+  }
   let objectsTruncated = false;
   if (listed.length > cfg.maxObjects) {
     objectsTruncated = true;
-    const reachable = await gitText(repo, ['rev-list', '--objects', '--all'], { allowNonZero: true, maxOutput: 8_000_000 });
-    const keep = new Set(index.map((entry) => entry.oid));
+    warnings.push(`Object list truncated to ${cfg.maxObjects}`);
+    const reachable = await gitText(repo, ['rev-list', '--objects', '--all'], {
+      allowNonZero: true,
+      maxOutput: 8_000_000,
+      allowTruncate: true,
+    });
+    const keep = new Set(hints.preferOids || []);
+    for (const entry of index) keep.add(entry.oid);
     if (head.oid) keep.add(head.oid);
     for (const line of reachable.stdout.split('\n')) {
       const oid = line.split(' ')[0];
       if (oid) keep.add(oid);
     }
-    listed = listed.filter((obj) => keep.has(obj.oid)).slice(0, cfg.maxObjects);
+    const preferred = listed.filter((obj) => keep.has(obj.oid));
+    const rest = listed.filter((obj) => !keep.has(obj.oid));
+    listed = [...preferred, ...rest].slice(0, cfg.maxObjects);
   }
 
-  const rawObjects = await catBatch(repo, listed.map((obj) => obj.oid));
+  const blobs = [];
+  const fetchIds = [];
+  for (const obj of listed) {
+    if (obj.type === 'blob' && obj.size > cfg.maxBlobBytes) {
+      blobs.push({
+        oid: obj.oid,
+        type: 'blob',
+        size: obj.size,
+        binary: false,
+        truncated: true,
+        content: null,
+      });
+      continue;
+    }
+    if (obj.type === 'blob' || obj.type === 'tree' || obj.type === 'commit' || obj.type === 'tag') {
+      fetchIds.push(obj.oid);
+    }
+  }
+  let rawObjects = [];
+  try {
+    rawObjects = await catBatch(repo, fetchIds);
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : 'Could not read objects');
+  }
   const commits = [];
   const trees = [];
-  const blobs = [];
+  const tags = [];
   for (const obj of rawObjects) {
     if (obj.missing) continue;
     if (obj.type === 'commit') {
@@ -511,6 +587,7 @@ export async function captureSnapshot(repo) {
         committer: parsed.committer,
         message: parsed.message.slice(0, 4000),
         signed: parsed.signed,
+        encoding: parsed.encoding,
         patches: [],
       });
     } else if (obj.type === 'tree') {
@@ -522,6 +599,9 @@ export async function captureSnapshot(repo) {
     } else if (obj.type === 'blob') {
       const decoded = decodeBlob(obj.content, cfg.maxBlobBytes);
       blobs.push({ oid: obj.oid, type: 'blob', ...decoded });
+    } else if (obj.type === 'tag') {
+      const parsed = parseTagText(obj.content.toString('utf8'));
+      tags.push({ oid: obj.oid, type: 'tag', ...parsed });
     }
   }
 
@@ -532,10 +612,11 @@ export async function captureSnapshot(repo) {
     worktree: worktreeResult.files,
     worktreeTruncated: worktreeResult.truncated,
     objectsTruncated,
-    objects: { commits, trees, blobs },
+    warnings,
+    objects: { commits, trees, blobs, tags },
     patches: { worktreeVsIndex: '', indexVsHead: '' },
   };
-  snapshot.objects.commits = orderCommits(commits, refs, head.oid);
+  snapshot.objects.commits = await orderFromGit(repo, commits);
   markReachable(snapshot);
 
   const patchTargets = snapshot.objects.commits.slice(0, cfg.maxPatchCommits);

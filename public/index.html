@@ -4,9 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BehindGit</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,400;0,500&family=Fraunces:opsz,wght@9..144,560;9..144,650&family=Outfit:wght@380;520;640&display=swap">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -44,7 +41,12 @@
       <div id="chips" class="chips"></div>
     </section>
 
-    <div class="workspace">
+    <div id="pane-toggle" class="pane-toggle" role="group" aria-label="Which column to show on a narrow screen">
+      <button type="button" data-pane="before" aria-pressed="false">Before</button>
+      <button type="button" data-pane="after" aria-pressed="true">After</button>
+    </div>
+
+    <div id="workspace" class="workspace show-after">
       <aside class="side">
         <section>
           <h2>Try this on moon</h2>
@@ -86,13 +88,13 @@
 
     <section class="diffs" aria-label="Diffs">
       <div class="diff-bar">
-        <div id="diff-tabs" class="diff-tabs"></div>
+        <div id="diff-tabs" class="diff-tabs" role="tablist" aria-label="Diff kind"></div>
         <div class="diff-side" role="group" aria-label="Which snapshot’s repository diffs to show">
-          <button type="button" data-side="before">Before</button>
-          <button type="button" data-side="after" class="on">After</button>
+          <button type="button" data-side="before" aria-pressed="false">Before</button>
+          <button type="button" data-side="after" class="on" aria-pressed="true">After</button>
         </div>
       </div>
-      <div id="diff-body" class="diff-body"></div>
+      <div id="diff-body" class="diff-body" role="tabpanel"></div>
     </section>
   </div>
   <script src="/app.js" type="module"></script>

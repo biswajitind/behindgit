@@ -12,6 +12,8 @@ export const ALLOWED_COMMANDS = Object.freeze([
   'rm',
   'status',
   'switch',
+  'restore',
+  'tag',
 ]);
 
 const BRANCH_RE = /^(?!.*\.lock$)(?!.*\.\.)(?!.*@\{)(?!.*\/\/)(?!\/)(?!.*\/$)[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
@@ -52,6 +54,10 @@ export function assertSafePath(inputPath) {
     throw new AppError('Invalid path');
   }
   if (inputPath.startsWith('-')) throw new AppError('Path must not start with -');
+  if (inputPath.startsWith(':')) throw new AppError('Pathspec magic is not allowed');
+  if (inputPath.includes('*') || inputPath.includes('?') || inputPath.includes('[')) {
+    throw new AppError('Path globs are not allowed');
+  }
   if (inputPath.startsWith('/') || /^[A-Za-z]:/.test(inputPath)) {
     throw new AppError('Absolute paths are not allowed');
   }
@@ -62,6 +68,8 @@ export function assertSafePath(inputPath) {
   }
   return inputPath;
 }
+
+const UNSAFE_UNQUOTED = new Set(['|', '&', ';', '<', '>', '`', '$', '\\', '\n', '\r', '\0']);
 
 function tokenize(input) {
   const tokens = [];
@@ -78,6 +86,15 @@ function tokenize(input) {
       let buf = '';
       let closed = false;
       while (i < input.length) {
+        if (quote === '"' && input[i] === '\\') {
+          const next = input[i + 1];
+          if (next === '"' || next === '\\' || next === 'n') {
+            buf += next === 'n' ? '\n' : next;
+            i += 2;
+            continue;
+          }
+        }
+        if (input[i] === '\0') throw new AppError('Command contains a NUL byte');
         if (input[i] === quote) {
           closed = true;
           i += 1;
@@ -92,12 +109,24 @@ function tokenize(input) {
     }
     let buf = '';
     while (i < input.length && input[i] !== ' ' && input[i] !== '\t') {
+      if (UNSAFE_UNQUOTED.has(input[i])) {
+        throw new AppError('Pipes, redirects, backticks, and other shell syntax are not allowed');
+      }
       if (input[i] === '"' || input[i] === "'") {
         if (!buf.includes('=')) throw new AppError('Quotes must wrap a whole argument');
         const quote = input[i];
         i += 1;
         let closed = false;
         while (i < input.length) {
+          if (quote === '"' && input[i] === '\\') {
+            const next = input[i + 1];
+            if (next === '"' || next === '\\' || next === 'n') {
+              buf += next === 'n' ? '\n' : next;
+              i += 2;
+              continue;
+            }
+          }
+          if (input[i] === '\0') throw new AppError('Command contains a NUL byte');
           if (input[i] === quote) {
             closed = true;
             i += 1;
@@ -121,13 +150,37 @@ function parseFlags(args, { bools, values }) {
   const foundBools = [];
   const foundValues = [];
   const positionals = [];
+  const afterDash = [];
   const valueSet = new Set(values);
   const boolSet = new Set(bools);
+  let dashed = false;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--') {
-      for (const rest of args.slice(i + 1)) positionals.push(rest);
-      break;
+      dashed = true;
+      continue;
+    }
+    if (dashed) {
+      afterDash.push(arg);
+      continue;
+    }
+    if (arg.startsWith('-') && !arg.startsWith('--') && arg.length > 2 && !arg.includes('=') && !boolSet.has(arg)) {
+      const chars = [...arg.slice(1)];
+      for (let c = 0; c < chars.length; c += 1) {
+        const flag = `-${chars[c]}`;
+        const last = c === chars.length - 1;
+        if (valueSet.has(flag)) {
+          if (!last) throw new AppError(`${flag} must be the last flag in ${arg}`);
+          const value = args[i + 1];
+          i += 1;
+          if (value === undefined || value.startsWith('-')) throw new AppError(`${flag} needs a value`);
+          foundValues.push([flag, value]);
+          continue;
+        }
+        if (!boolSet.has(flag)) throw new AppError(`Flag not allowed: ${flag}`);
+        foundBools.push(flag);
+      }
+      continue;
     }
     if (arg === '-') {
       positionals.push(arg);
@@ -156,15 +209,15 @@ function parseFlags(args, { bools, values }) {
     }
     positionals.push(arg);
   }
-  return { bools: foundBools, values: foundValues, positionals };
+  return { bools: foundBools, values: foundValues, positionals, afterDash };
 }
 
 function parseAdd(args) {
-  const { bools, positionals } = parseFlags(args, {
+  const { bools, positionals, afterDash } = parseFlags(args, {
     bools: ['-A', '--all', '-u', '--update', '-f', '--force', '-n', '--dry-run', '-v', '--verbose'],
     values: [],
   });
-  const paths = positionals.map((p) => assertSafePath(p));
+  const paths = [...positionals, ...afterDash].map((p) => assertSafePath(p));
   const updatesTree = bools.some((flag) => ['-A', '--all', '-u', '--update'].includes(flag));
   if (!updatesTree && paths.length === 0) {
     throw new AppError('git add needs a path or -A/--all/-u');
@@ -229,13 +282,32 @@ function parseMerge(args) {
 }
 
 function parseReset(args) {
-  const { bools, positionals } = parseFlags(args, {
+  const { bools, positionals, afterDash } = parseFlags(args, {
     bools: ['--soft', '--mixed', '--hard', '-q', '--quiet'],
     values: [],
   });
   const modes = bools.filter((flag) => ['--soft', '--mixed', '--hard'].includes(flag));
   if (modes.length > 1) throw new AppError('Choose only one of --soft, --mixed, or --hard');
+  if (afterDash.length) {
+    if (modes.some((flag) => flag === '--soft' || flag === '--hard')) {
+      throw new AppError('git reset of paths is mixed mode only');
+    }
+    if (positionals.length > 1) throw new AppError('git reset takes at most one revision before --');
+    const paths = afterDash.map((p) => assertSafePath(p));
+    const argv = ['reset', ...(modes.length ? modes : ['--mixed'])];
+    const checks = [];
+    if (positionals.length === 1) {
+      const rev = assertRevision(positionals[0]);
+      argv.push(rev);
+      checks.push({ op: 'rev', value: rev });
+    }
+    argv.push('--', ...paths);
+    return { argv, checks };
+  }
   if (positionals.length > 1) throw new AppError('git reset takes at most one revision');
+  if (positionals.length === 1 && modes.length === 0) {
+    return { argv: ['reset', positionals[0]], checks: [{ op: 'reset-target', value: positionals[0] }] };
+  }
   const argv = ['reset', ...bools];
   const checks = [];
   if (positionals.length === 1) {
@@ -261,10 +333,24 @@ function parseSwitch(args) {
 }
 
 function parseSwitchLike(args, { command, createFlags }) {
-  const { bools, values, positionals } = parseFlags(args, {
-    bools: [],
+  const { bools, values, positionals, afterDash } = parseFlags(args, {
+    bools: ['--detach'],
     values: createFlags,
   });
+  if (afterDash.length) {
+    if (command !== 'checkout') throw new AppError(`git ${command} does not take paths`);
+    if (positionals.length || values.length || bools.length) {
+      throw new AppError('git checkout -- takes paths only');
+    }
+    const paths = afterDash.map((p) => assertSafePath(p));
+    return { argv: ['checkout', '--', ...paths], checks: [] };
+  }
+  if (bools.includes('--detach')) {
+    if (values.length) throw new AppError(`git ${command} --detach does not create a branch`);
+    if (positionals.length !== 1) throw new AppError(`git ${command} --detach needs a revision`);
+    const rev = assertRevision(positionals[0]);
+    return { argv: [command, '--detach', rev], checks: [{ op: 'rev', value: rev }] };
+  }
   if (bools.length) throw new AppError(`Flag not allowed for git ${command}`);
   if (values.length > 1) throw new AppError(`Use only one of ${createFlags.join(' or ')}`);
   if (values.length === 1) {
@@ -285,14 +371,70 @@ function parseSwitchLike(args, { command, createFlags }) {
     return { argv: [command, '-'], checks: [] };
   }
   if (positionals.length !== 1) throw new AppError(`git ${command} needs a branch name`);
+  try {
+    const name = assertBranchName(positionals[0]);
+    return {
+      argv: [command, name],
+      checks: [{ op: 'checkout-target', command, name }],
+    };
+  } catch {
+    const rev = assertRevision(positionals[0]);
+    return { argv: [command, '--detach', rev], checks: [{ op: 'rev', value: rev }] };
+  }
+}
+
+function parseRestore(args) {
+  const { bools, values, positionals, afterDash } = parseFlags(args, {
+    bools: ['--staged', '--worktree'],
+    values: ['--source'],
+  });
+  const rawPaths = afterDash.length ? afterDash : positionals;
+  if (!rawPaths.length) throw new AppError('git restore needs at least one path');
+  const paths = rawPaths.map((p) => assertSafePath(p));
+  const sources = values.filter(([flag]) => flag === '--source');
+  if (sources.length > 1) throw new AppError('Only one --source is allowed');
+  const argv = ['restore', ...bools];
+  const checks = [];
+  if (sources.length === 1) {
+    const rev = assertRevision(sources[0][1]);
+    argv.push('--source', rev);
+    checks.push({ op: 'rev', value: rev });
+  }
+  argv.push('--', ...paths);
+  return { argv, checks };
+}
+
+function parseTag(args) {
+  const { bools, values, positionals } = parseFlags(args, {
+    bools: ['-a', '--annotate', '-d', '--delete', '-l', '--list'],
+    values: ['-m', '--message'],
+  });
+  const deleting = bools.filter((flag) => flag === '-d' || flag === '--delete');
+  if (deleting.length) {
+    if (positionals.length !== 1) throw new AppError('git tag -d needs one tag name');
+    const name = assertBranchName(positionals[0]);
+    return { argv: ['tag', '-d', name], checks: [] };
+  }
+  if (positionals.length === 0) return { argv: ['tag', ...bools.filter((flag) => flag === '-l' || flag === '--list')], checks: [] };
+  if (positionals.length > 2) throw new AppError('git tag takes a name and an optional revision');
   const name = assertBranchName(positionals[0]);
-  return {
-    argv: [command, name],
-    checks: [
-      { op: 'branch-format', name },
-      { op: 'branch-exists', name },
-    ],
-  };
+  const messages = values.filter(([flag]) => flag === '-m' || flag === '--message');
+  const annotated = bools.some((flag) => flag === '-a' || flag === '--annotate') || messages.length > 0;
+  if (messages.length > 1) throw new AppError('Only one tag message is allowed');
+  if (annotated && messages.length !== 1) throw new AppError('Annotated tags need -m "message"');
+  if (messages.length === 1 && (!messages[0][1].trim() || messages[0][1].length > 2000)) {
+    throw new AppError('Tag message is empty or too long');
+  }
+  const argv = ['tag'];
+  if (annotated) argv.push('-a', '-m', messages[0][1]);
+  argv.push(name);
+  const checks = [];
+  if (positionals.length === 2) {
+    const rev = assertRevision(positionals[1]);
+    argv.push(rev);
+    checks.push({ op: 'rev', value: rev });
+  }
+  return { argv, checks };
 }
 
 function parseBranch(args) {
@@ -349,11 +491,11 @@ function parseStatus(args) {
 }
 
 function parseDiff(args) {
-  const { bools, positionals } = parseFlags(args, {
+  const { bools, positionals, afterDash } = parseFlags(args, {
     bools: ['--cached', '--staged', '--stat', '--name-status', '--name-only', '--no-color'],
     values: [],
   });
-  const paths = positionals.map((p) => assertSafePath(p));
+  const paths = [...positionals, ...afterDash].map((p) => assertSafePath(p));
   const argv = ['diff', '--no-color', ...bools.filter((flag) => flag !== '--no-color')];
   if (paths.length) argv.push('--', ...paths);
   return { argv, checks: [] };
@@ -379,11 +521,11 @@ function parseLog(args) {
 }
 
 function parseRm(args) {
-  const { bools, positionals } = parseFlags(args, {
+  const { bools, positionals, afterDash } = parseFlags(args, {
     bools: ['--cached', '-f', '--force', '-r', '--recursive', '-q', '--quiet', '-n', '--dry-run'],
     values: [],
   });
-  const paths = positionals.map((p) => assertSafePath(p));
+  const paths = [...positionals, ...afterDash].map((p) => assertSafePath(p));
   if (!paths.length) throw new AppError('git rm needs at least one path');
   if (paths.some((p) => p === '.')) throw new AppError('Refusing to git rm the whole repository');
   return { argv: ['rm', ...bools, '--', ...paths], checks: [] };
@@ -399,8 +541,10 @@ const PARSERS = {
   merge: parseMerge,
   reset: parseReset,
   rm: parseRm,
+  restore: parseRestore,
   status: parseStatus,
   switch: parseSwitch,
+  tag: parseTag,
 };
 
 export function parseGitCommand(input) {
@@ -408,9 +552,7 @@ export function parseGitCommand(input) {
   const trimmed = input.trim();
   if (!trimmed) throw new AppError('Enter a git command');
   if (trimmed.length > 2000) throw new AppError('Command is too long');
-  if (/[\0\r\n|&;<>`$\\]/.test(trimmed)) {
-    throw new AppError('Pipes, redirects, backticks, and other shell syntax are not allowed');
-  }
+  if (trimmed.includes('\0')) throw new AppError('Command contains a NUL byte');
   const tokens = tokenize(trimmed);
   if (tokens.length === 0 || tokens[0] !== 'git') {
     throw new AppError('Only git commands are allowed');

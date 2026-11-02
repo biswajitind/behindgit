@@ -141,6 +141,18 @@ test('identical snapshots have an empty diff', () => {
   assert.equal(summarizeChanges(changes), 'No changes in the worktree, index, refs, or object store');
 });
 
+test('a truncated object list does not invent removed objects', () => {
+  const before = beforeCommit();
+  before.objectsTruncated = true;
+  const after = beforeCommit();
+  after.objects.blobs = [];
+  after.objectsTruncated = true;
+  const changes = diffSnapshots(before, after);
+  assert.deepEqual(changes.objects.blobs.removed, []);
+  assert.deepEqual(changes.objects.commits.removed, []);
+  assert.deepEqual(changes.objects.trees.removed, []);
+});
+
 test('a merge conflict in the index is called out', () => {
   const before = beforeCommit();
   const after = beforeCommit();

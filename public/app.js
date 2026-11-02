@@ -1,3 +1,5 @@
+import { layoutCommits } from './graph.js';
+
 const PRESETS = [
   'git status',
   'git add test_main.py',
@@ -55,7 +57,11 @@ function quoteArg(arg) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+    headers: {
+      'content-type': 'application/json',
+      'x-behindgit': '1',
+      ...(options.headers || {}),
+    },
   });
   const data = await response.json().catch(() => ({ error: 'Bad response from server' }));
   if (!response.ok) {
@@ -112,11 +118,8 @@ function chooseTab(view) {
 
 function setBusy(busy) {
   state.busy = busy;
-  $('run-btn').disabled = busy;
-  $('reset-btn').disabled = busy;
-  $('save-btn').disabled = busy;
-  document.querySelectorAll('[data-command], [data-suggest]').forEach((button) => {
-    button.disabled = busy;
+  document.querySelectorAll('button, input, textarea').forEach((el) => {
+    el.disabled = busy;
   });
 }
 
@@ -126,7 +129,14 @@ async function boot() {
     const config = await api('/api/config');
     state.sample = config;
     $('sample-label').textContent = config.label || 'moon';
-    if (config.upstream) $('upstream').href = config.upstream;
+    const upstream = $('upstream');
+    if (config.upstream) {
+      upstream.href = config.upstream;
+      upstream.hidden = false;
+    } else {
+      upstream.hidden = true;
+      upstream.removeAttribute('href');
+    }
     const created = await api('/api/sessions', { method: 'POST', body: '{}' });
     state.id = created.id;
     state.sample = created.sample || config;
@@ -194,8 +204,23 @@ async function saveFile(filePath, content) {
   }
 }
 
+let armedDelete = null;
+
+function disarmDelete() {
+  armedDelete = null;
+  const button = $('delete-btn');
+  if (button) button.textContent = 'Delete';
+}
+
 async function deleteSelected() {
   if (!state.selected || state.busy) return;
+  if (armedDelete !== state.selected) {
+    armedDelete = state.selected;
+    $('delete-btn').textContent = 'Click again to delete';
+    $('summary').textContent = `Click Delete again to remove ${state.selected}. There is no undo.`;
+    return;
+  }
+  disarmDelete();
   setBusy(true);
   try {
     const result = await api(`/api/sessions/${state.id}/files/delete`, {
@@ -232,11 +257,32 @@ async function resetSandbox() {
 }
 
 function applyResult(result) {
+  if (!result.after) {
+    $('summary').textContent = result.summary || 'The repository could not be read after that command.';
+    const parts = [];
+    if (result.argv) parts.push(`$ git ${result.argv.map(quoteArg).join(' ')}`);
+    if (result.stdout) parts.push(result.stdout.trimEnd());
+    if (result.stderr) parts.push(result.stderr.trimEnd());
+    if (parts.length) {
+      $('console').textContent = parts.join('\n\n');
+      $('console').classList.toggle('fail', result.ok === false);
+    }
+    return;
+  }
   state.view = result;
   state.open.clear();
   state.closed.clear();
   state.diffTab = chooseTab(result);
   render();
+}
+
+function pathAllowed(filePath) {
+  if (typeof filePath !== 'string' || !filePath || filePath.length > 512) return false;
+  if (filePath.includes('\\') || filePath.includes('\0')) return false;
+  if (filePath.startsWith('/') || filePath.startsWith('-') || filePath.startsWith(':')) return false;
+  if (filePath.includes('*') || filePath.includes('?') || filePath.includes('[')) return false;
+  const parts = filePath.split('/');
+  return parts.every((part) => part && part !== '.' && part !== '..' && part.toLowerCase() !== '.git');
 }
 
 function fileByPath(snapshot, filePath) {
@@ -248,6 +294,7 @@ function loadEditor(force) {
   if (!force && state.dirty) return;
   $('editor').value = file?.content ?? '';
   state.dirty = false;
+  disarmDelete();
   renderEditorState();
   renderFileList();
 }
@@ -357,32 +404,6 @@ function isOpen(side, oid, marks) {
   return marks.side === 'after' && (marks.added.has(oid) || marks.lost.has(oid));
 }
 
-function layoutCommits(commits) {
-  const rows = commits.map((commit) => ({ ...commit, lane: 0, joins: [] }));
-  const indexOf = new Map(rows.map((row, index) => [row.oid, index]));
-  const active = [];
-  for (const row of rows) {
-    let lane = active.indexOf(row.oid);
-    if (lane === -1) {
-      lane = active.findIndex((value) => value == null);
-      if (lane === -1) lane = active.length;
-    }
-    row.lane = lane;
-    const parents = (row.parents || []).filter((parent) => indexOf.has(parent));
-    active[lane] = parents[0] || null;
-    for (let i = 1; i < parents.length; i += 1) {
-      let parentLane = active.indexOf(parents[i]);
-      if (parentLane === -1) {
-        parentLane = active.findIndex((value) => value == null);
-        if (parentLane === -1) parentLane = active.length;
-        active[parentLane] = parents[i];
-      }
-      row.joins.push(parentLane);
-    }
-  }
-  return { rows, laneCount: Math.max(1, active.length) };
-}
-
 function renderGraph(snapshot, marks, side) {
   const commits = snapshot.objects.commits;
   if (!commits.length) return '<p class="empty">No commits in the object store.</p>';
@@ -413,7 +434,8 @@ function renderGraph(snapshot, marks, side) {
     const point = pos.get(row.oid);
     const klass = objectClass(row.oid, marks);
     const unreachable = row.reachable === false ? 'unreachable' : '';
-    return `<circle class="${klass} ${unreachable}" cx="${point.x}" cy="${point.y}" r="4" />`;
+    const label = klass === 'added' ? 'added' : (klass === 'removed' || unreachable) ? 'removed' : 'commit';
+    return `<circle class="${klass} ${unreachable}" cx="${point.x}" cy="${point.y}" r="4"><title>${label} ${esc(short(row.oid))}</title></circle>`;
   }).join('');
   const cards = rows.map((row) => {
     const klass = objectClass(row.oid, marks);
@@ -495,6 +517,13 @@ function indexRowClass(side, entry, changes) {
   return '';
 }
 
+function changeWord(klass) {
+  if (klass.includes('added')) return 'added';
+  if (klass.includes('removed')) return 'removed';
+  if (klass.includes('changed')) return 'changed';
+  return '';
+}
+
 function stageLabel(stage) {
   if (stage === 1) return 'base';
   if (stage === 2) return 'ours';
@@ -519,20 +548,26 @@ function renderPane(side, view) {
   const ghosts = side === 'after'
     ? changes.refs.removed.map((ref) => `<span class="ref removed">${esc(ref.name.replace('refs/heads/', ''))} removed</span>`).join('')
     : '';
-  const files = snapshot.worktree.map((file) => (
-    `<button type="button" class="row linkish ${fileRowClass(side, file, changes)}" data-file="${esc(file.path)}">
-      <span class="status">${esc(file.statusLabel || 'clean')}</span>
+  const files = snapshot.worktree.map((file) => {
+    const klass = fileRowClass(side, file, changes);
+    const word = changeWord(klass);
+    const label = [file.statusLabel || 'clean', word, file.path].filter(Boolean).join(' ');
+    return `<button type="button" class="row linkish ${klass}" data-file="${esc(file.path)}" aria-label="${esc(label)}">
+      <span class="status">${esc(file.statusLabel || 'clean')}${word ? ` ${esc(word)}` : ''}</span>
       <span class="path">${esc(file.path)}</span>
       <span class="oid">${esc(short(file.oid))}</span>
-    </button>`
-  )).join('');
-  const indexRows = snapshot.index.map((entry) => (
-    `<div class="row ${indexRowClass(side, entry, changes)}">
-      <span class="status">${esc(entry.stage ? stageLabel(entry.stage) : (entry.state || 'staged'))}</span>
+    </button>`;
+  }).join('');
+  const indexRows = snapshot.index.map((entry) => {
+    const klass = indexRowClass(side, entry, changes);
+    const word = changeWord(klass);
+    const status = entry.stage ? stageLabel(entry.stage) : (entry.state || 'staged');
+    return `<div class="row ${klass}" role="group" aria-label="${esc([status, word, entry.path].filter(Boolean).join(' '))}">
+      <span class="status">${esc(status)}${word ? ` ${esc(word)}` : ''}</span>
       <span class="path">${esc(entry.path)}</span>
       <span class="oid">${esc(short(entry.oid))}</span>
-    </div>`
-  )).join('');
+    </div>`;
+  }).join('');
   const indexGhosts = side === 'after'
     ? changes.index.removed.map((entry) => (
       `<div class="row removed"><span class="status">removed</span><span class="path">${esc(entry.path)}</span><span class="oid">${esc(stageLabel(entry.stage))}</span></div>`
@@ -628,10 +663,12 @@ function renderDiffs() {
     ['objects', 'Object store'],
   ];
   $('diff-tabs').innerHTML = tabs.map(([id, label]) => (
-    `<button type="button" data-tab="${id}" class="${state.diffTab === id ? 'on' : ''}">${label}</button>`
+    `<button type="button" role="tab" id="tab-${id}" aria-controls="diff-body" data-tab="${id}" aria-selected="${state.diffTab === id}" tabindex="${state.diffTab === id ? '0' : '-1'}" class="${state.diffTab === id ? 'on' : ''}">${label}</button>`
   )).join('');
   document.querySelectorAll('[data-side]').forEach((button) => {
-    button.classList.toggle('on', button.dataset.side === state.diffSide);
+    const on = button.dataset.side === state.diffSide;
+    button.classList.toggle('on', on);
+    button.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
   const snapshot = view[state.diffSide] || view.after;
   let html;
@@ -675,6 +712,7 @@ function render() {
   renderConsole(view);
   renderFileList();
   renderEditorState();
+  if (state.busy) setBusy(true);
 }
 
 function currentFileContent() {
@@ -764,6 +802,17 @@ function bind() {
         state.open.add(key);
       }
       render();
+      document.querySelector(`[data-open="${CSS.escape(key)}"]`)?.focus();
+      return;
+    }
+    const pane = event.target.closest('[data-pane]');
+    if (pane) {
+      const workspace = $('workspace');
+      workspace.classList.toggle('show-before', pane.dataset.pane === 'before');
+      workspace.classList.toggle('show-after', pane.dataset.pane === 'after');
+      document.querySelectorAll('[data-pane]').forEach((button) => {
+        button.setAttribute('aria-pressed', button === pane ? 'true' : 'false');
+      });
       return;
     }
     const tab = event.target.closest('[data-tab]');
@@ -788,9 +837,24 @@ function bind() {
   });
   $('discard-btn').addEventListener('click', () => loadEditor(true));
   $('delete-btn').addEventListener('click', deleteSelected);
+  $('diff-tabs').addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+    const order = ['worktree', 'index', 'commit', 'objects'];
+    const current = order.indexOf(state.diffTab);
+    if (current === -1) return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowRight' ? 1 : -1;
+    state.diffTab = order[(current + delta + order.length) % order.length];
+    renderDiffs();
+    document.getElementById(`tab-${state.diffTab}`)?.focus();
+  });
   $('new-file-btn').addEventListener('click', () => {
     const filePath = $('new-path').value.trim();
     if (!filePath) return;
+    if (!pathAllowed(filePath)) {
+      $('summary').textContent = 'That path is not allowed. Use a relative path inside the work tree.';
+      return;
+    }
     if (state.dirty) {
       $('summary').textContent = 'Save or discard the open file first.';
       return;

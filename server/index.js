@@ -21,7 +21,14 @@ const timer = setInterval(() => {
 timer.unref();
 
 const app = createApp();
-app.listen(cfg.port, cfg.host, () => {
+const server = app.listen(cfg.port, cfg.host, () => {
   const shownHost = cfg.host === '0.0.0.0' || cfg.host === '::' ? 'localhost' : cfg.host;
   console.log(`BehindGit listening on http://${shownHost}:${cfg.port}`);
 });
+
+function shutdown() {
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

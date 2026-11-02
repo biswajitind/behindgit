@@ -16,9 +16,9 @@
   --removed: #ff8d86;
   --changed: #ffd36e;
   --danger: #ff6b62;
-  --serif: "Fraunces", "Iowan Old Style", Palatino, Georgia, serif;
-  --sans: "Outfit", "Avenir Next", "Segoe UI", sans-serif;
-  --mono: "DM Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --serif: "Iowan Old Style", Palatino, Georgia, serif;
+  --sans: "Avenir Next", "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
 }
 
@@ -167,6 +167,26 @@ button { cursor: pointer; }
   gap: 10px;
   padding: 8px 12px;
   align-items: start;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+.pane-toggle {
+  display: none;
+  gap: 6px;
+}
+
+.pane-toggle button {
+  border: 1px solid var(--line-strong);
+  background: var(--raise);
+  padding: 6px 10px;
+}
+
+.pane-toggle button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
 }
 
 .command-line {
@@ -433,12 +453,18 @@ button.linkish {
 .fail-text { color: var(--danger); }
 
 @media (max-width: 1100px) {
-  .app { height: auto; grid-template-rows: auto auto auto auto auto; }
+  .app { height: auto; grid-template-rows: auto auto auto auto auto auto; }
   .workspace { grid-template-columns: 1fr; }
   .pane, .side { max-height: none; overflow: visible; }
   .diffs { min-height: 220px; }
   .summary-bar { grid-template-columns: 1fr; }
   .chips { justify-content: flex-start; }
+}
+
+@media (max-width: 900px) {
+  .pane-toggle { display: flex; }
+  .workspace.show-before .pane.after { display: none; }
+  .workspace.show-after .pane.before { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
