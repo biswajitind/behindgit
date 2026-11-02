@@ -223,6 +223,11 @@ test('sha256 samples are rejected', async () => {
   dirs.push(dir);
   try {
     await exec('git', ['init', '-q', '--object-format=sha256', '-b', 'main', dir]);
+    await exec('git', ['-C', dir, 'config', 'user.email', 't@example.com']);
+    await exec('git', ['-C', dir, 'config', 'user.name', 'Tester']);
+    await writeFile(path.join(dir, 'a'), 'a\n');
+    await exec('git', ['-C', dir, 'add', 'a']);
+    await exec('git', ['-C', dir, 'commit', '-q', '-m', 'sha256']);
   } catch {
     return;
   }
