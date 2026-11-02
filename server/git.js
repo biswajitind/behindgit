@@ -11,7 +11,24 @@ export const requestContext = new AsyncLocalStorage();
 const privateHome = path.join(os.tmpdir(), 'behindgit-git-home');
 mkdirSync(privateHome, { recursive: true });
 
-function redact(text) {
+const liveGitPids = new Set();
+
+export function killGitChildren() {
+  for (const pid of liveGitPids) {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // The process has already exited.
+      }
+    }
+  }
+  liveGitPids.clear();
+}
+
+export function redact(text) {
   const root = getConfig().sandboxRoot;
   return String(text).split(root).join('[sandbox]');
 }
@@ -96,6 +113,12 @@ export function runGit(repo, args, options = {}) {
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
     });
+    if (child.pid) liveGitPids.add(child.pid);
+    const dropChild = () => {
+      if (child.pid) liveGitPids.delete(child.pid);
+    };
+    child.on('close', dropChild);
+    child.on('error', dropChild);
 
     const out = [];
     const err = [];

@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { executeGit } from '../server/commands.js';
 import { gitText, requestContext } from '../server/git.js';
-import { createSession, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
+import { assertGitQuota, createSession, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
 import { captureSnapshot } from '../server/snapshot.js';
 
 const exec = promisify(execFile);
@@ -216,6 +216,56 @@ test('a request past its deadline does not start another git command', async () 
     () => requestContext.run({ deadlineAt: Date.now() - 5 }, () => gitText(repo, ['status'])),
     /deadline exceeded/,
   );
+});
+
+test('a slashed branch name resets to that revision', async () => {
+  const repo = await initRepo();
+  await writeFile(path.join(repo, 'a'), 'a\n');
+  await git(repo, ['add', 'a']);
+  await git(repo, ['commit', '-m', 'first']);
+  const first = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+  await git(repo, ['branch', 'feature/login']);
+  await writeFile(path.join(repo, 'b'), 'b\n');
+  await git(repo, ['add', 'b']);
+  await git(repo, ['commit', '-m', 'second']);
+  const result = await executeGit(repo, 'git reset feature/login');
+  assert.equal(result.exitCode, 0);
+  const head = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+  assert.equal(head, first);
+});
+
+test('an over-budget object read is truncated, not an empty snapshot', async () => {
+  const repo = await initRepo();
+  await writeFile(path.join(repo, 'big'), 'x'.repeat(800));
+  await git(repo, ['add', 'big']);
+  await git(repo, ['commit', '-m', 'big']);
+  process.env.BEHINDGIT_MAX_OBJECT_BYTES = '500';
+  try {
+    const snapshot = await captureSnapshot(repo);
+    assert.equal(snapshot.objectsTruncated, true);
+    assert.ok(snapshot.objects.commits.some((commit) => commit.message.includes('big')));
+  } finally {
+    delete process.env.BEHINDGIT_MAX_OBJECT_BYTES;
+  }
+});
+
+test('the object store quota rejects another command', async () => {
+  const repo = await initRepo();
+  process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES = '1';
+  try {
+    await assert.rejects(() => assertGitQuota(repo), /object store quota/);
+  } finally {
+    delete process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES;
+  }
+});
+
+test('command output redacts the sandbox root', async () => {
+  const session = await createSession();
+  const result = await executeGit(session.dir, 'git status');
+  assert.notEqual(result.exitCode, 0);
+  const text = `${result.stdout}\n${result.stderr}`;
+  assert.equal(text.includes(session.dir), false);
+  assert.match(text, /\[sandbox\]/);
 });
 
 test('sha256 samples are rejected', async () => {

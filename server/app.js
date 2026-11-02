@@ -6,8 +6,9 @@ import { describeSample, getConfig, repoRoot } from './config.js';
 import { diffSnapshots, summarizeChanges } from './diff.js';
 import { AppError } from './errors.js';
 import { requestContext } from './git.js';
-import { rateLimit, requireSameOriginMutation } from './httpguard.js';
+import { clientKey, rateLimit, requireSameOriginMutation } from './httpguard.js';
 import {
+  assertGitQuota,
   createSession,
   deleteWorktreeFile,
   enqueue,
@@ -55,6 +56,7 @@ async function withTransition(session, label, mutate) {
     const before = session.lastSnapshot
       ? structuredClone(session.lastSnapshot)
       : await captureSnapshot(session.repo);
+    await assertGitQuota(session.repo);
     const executed = await mutate();
     let after = null;
     let warning = null;
@@ -92,6 +94,7 @@ async function withTransition(session, label, mutate) {
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
+  if (getConfig().trustProxy) app.set('trust proxy', 1);
   app.use((req, res, next) => {
     res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -116,7 +119,7 @@ export function createApp() {
   });
 
   app.post('/api/sessions', rateLimit('create'), wrap(async (req, res) => {
-    const session = await createSession();
+    const session = await createSession({ clientKey: clientKey(req) });
     const snapshot = await captureSnapshot(session.repo);
     session.lastSnapshot = structuredClone(snapshot);
     res.status(201).json({
@@ -126,9 +129,10 @@ export function createApp() {
     });
   }));
 
-  app.get('/api/sessions/:id', wrap(async (req, res) => {
+  app.get('/api/sessions/:id', rateLimit('read'), wrap(async (req, res) => {
     const session = getSession(req.params.id);
     const snapshot = await enqueue(session, async () => {
+      if (session.lastSnapshot) return session.lastSnapshot;
       const captured = await captureSnapshot(session.repo, { preferOids: preferOids(session.lastSnapshot) });
       session.lastSnapshot = structuredClone(captured);
       return captured;
@@ -136,7 +140,7 @@ export function createApp() {
     res.json({ id: session.id, snapshot });
   }));
 
-  app.post('/api/sessions/:id/reset', wrap(async (req, res) => {
+  app.post('/api/sessions/:id/reset', rateLimit('command'), wrap(async (req, res) => {
     const session = getSession(req.params.id);
     const snapshot = await enqueue(session, async () => {
       await rebuildRepo(session);

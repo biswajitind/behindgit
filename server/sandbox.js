@@ -11,6 +11,7 @@ import { gitText } from './git.js';
 const sessions = new Map();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 let pendingCreates = 0;
+const pendingByClient = new Map();
 let clonesInFlight = 0;
 const cloneWaiters = [];
 let slotGate = Promise.resolve();
@@ -240,6 +241,20 @@ async function closeSession(session) {
   await rm(session.dir, { recursive: true, force: true });
 }
 
+function sessionsFor(clientKey) {
+  return [...sessions.values()]
+    .filter((session) => !session.closing && session.clientKey === clientKey)
+    .sort((a, b) => a.lastUsed - b.lastUsed);
+}
+
+async function evictOwnToCap(cfg, clientKey) {
+  const own = sessionsFor(clientKey);
+  const pending = pendingByClient.get(clientKey) || 0;
+  while (own.length + pending >= cfg.maxSessionsPerClient && own.length) {
+    await closeSession(own.shift());
+  }
+}
+
 async function evictIdleToFit(cfg) {
   const now = Date.now();
   const idle = [...sessions.values()]
@@ -250,11 +265,25 @@ async function evictIdleToFit(cfg) {
   }
 }
 
-export async function createSession() {
+function releasePending(clientKey) {
+  pendingCreates -= 1;
+  const left = (pendingByClient.get(clientKey) || 1) - 1;
+  if (left <= 0) pendingByClient.delete(clientKey);
+  else pendingByClient.set(clientKey, left);
+}
+
+export async function createSession(options = {}) {
   const cfg = getConfig();
+  const clientKey = options.clientKey || 'local';
   await mkdir(cfg.sandboxRoot, { recursive: true });
   const sample = resolveSample(cfg);
   await withSlot(async () => {
+    await evictOwnToCap(cfg, clientKey);
+    if (sessionsFor(clientKey).length + (pendingByClient.get(clientKey) || 0) >= cfg.maxSessionsPerClient) {
+      const error = new AppError('Too many sandboxes for this client', 429);
+      error.retryAfter = 5;
+      throw error;
+    }
     await evictIdleToFit(cfg);
     if (sessions.size + pendingCreates >= cfg.maxSessions) {
       const error = new AppError('Too many active sessions. Try again shortly.', 503);
@@ -262,6 +291,7 @@ export async function createSession() {
       throw error;
     }
     pendingCreates += 1;
+    pendingByClient.set(clientKey, (pendingByClient.get(clientKey) || 0) + 1);
   });
 
   const id = randomUUID();
@@ -276,7 +306,7 @@ export async function createSession() {
       releaseClone();
     }
   } catch (error) {
-    pendingCreates -= 1;
+    releasePending(clientKey);
     await rm(dir, { recursive: true, force: true });
     throw error;
   }
@@ -285,6 +315,7 @@ export async function createSession() {
     dir,
     repo,
     sample,
+    clientKey,
     createdAt: Date.now(),
     lastUsed: Date.now(),
     queue: Promise.resolve(),
@@ -293,7 +324,7 @@ export async function createSession() {
     lastSnapshot: null,
   };
   sessions.set(id, session);
-  pendingCreates -= 1;
+  releasePending(clientKey);
   return session;
 }
 
@@ -336,6 +367,37 @@ async function worktreeUsage(repo) {
   }
   await walk(repo);
   return { bytes, files };
+}
+
+async function directoryBytes(dir) {
+  let bytes = 0;
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return 0;
+    throw error;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      bytes += await directoryBytes(full);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    const st = await lstat(full);
+    bytes += st.size;
+  }
+  return bytes;
+}
+
+export async function assertGitQuota(repo) {
+  const cfg = getConfig();
+  const bytes = await directoryBytes(path.join(repo, '.git'));
+  if (bytes > cfg.sessionMaxGitBytes) {
+    throw new AppError('Session object store quota exceeded', 413);
+  }
 }
 
 export async function assertWorktreeQuota(repo, full, nextBytes) {

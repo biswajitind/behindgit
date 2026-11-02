@@ -1,6 +1,6 @@
 import { AppError } from './errors.js';
 import { assertSafePath, parseGitCommand } from './allowlist.js';
-import { gitText } from './git.js';
+import { gitText, redact } from './git.js';
 import { getConfig } from './config.js';
 
 async function validateChecks(repo, checks) {
@@ -56,12 +56,22 @@ async function applyDynamicChecks(repo, parsed) {
     }
     if (check.op === 'reset-target') {
       const token = check.value;
-      const looksPath = token.includes('/') || token.includes('.');
-      const asRev = looksPath ? { exitCode: 1 } : await gitText(
+      const asRev = await gitText(
         repo,
         ['rev-parse', '--verify', '--end-of-options', `${token}^{commit}`],
         { allowNonZero: true },
       );
+      let pathKnown = false;
+      try {
+        const safe = assertSafePath(token);
+        const listed = await gitText(repo, ['ls-files', '--error-unmatch', '--', safe], { allowNonZero: true });
+        pathKnown = listed.exitCode === 0;
+      } catch {
+        // The token is not a path we will reset. A revision can still match.
+      }
+      if (asRev.exitCode === 0 && pathKnown) {
+        throw new AppError(`Ambiguous argument '${token}': both a revision and a file. Use -- to name a path.`);
+      }
       if (asRev.exitCode === 0) {
         parsed.argv = ['reset', token];
         checks.push({ op: 'rev', value: token });
@@ -90,7 +100,7 @@ export async function executeGit(repo, input, options = {}) {
   return {
     argv: parsed.argv,
     exitCode: result.exitCode,
-    stdout: result.stdout,
-    stderr: result.stderr,
+    stdout: redact(result.stdout),
+    stderr: redact(result.stderr),
   };
 }

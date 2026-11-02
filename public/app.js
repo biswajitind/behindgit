@@ -31,6 +31,7 @@ const state = {
   closed: new Set(),
   diffTab: 'commit',
   diffSide: 'after',
+  focusId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -117,10 +118,21 @@ function chooseTab(view) {
 }
 
 function setBusy(busy) {
+  if (busy && !state.busy) {
+    const active = document.activeElement;
+    state.focusId = active && active.id ? active.id : null;
+  }
   state.busy = busy;
-  document.querySelectorAll('button, input, textarea').forEach((el) => {
-    el.disabled = busy;
+  document.querySelectorAll('button').forEach((button) => {
+    if (button.id === 'save-btn' || button.id === 'delete-btn' || button.id === 'discard-btn') return;
+    button.disabled = busy;
   });
+  renderEditorState();
+  if (!busy && state.focusId) {
+    const el = document.getElementById(state.focusId);
+    state.focusId = null;
+    if (el && !el.disabled) el.focus();
+  }
 }
 
 async function boot() {
@@ -304,7 +316,14 @@ function renderEditorState() {
   const bits = [state.selected || 'no file'];
   if (file?.statusLabel && file.statusLabel !== 'clean') bits.push(file.statusLabel);
   if (state.dirty) bits.push('unsaved');
-  $('editor-state').textContent = bits.join(' · ');
+  const label = $('editor-state');
+  if (label) label.textContent = bits.join(' · ');
+  const save = $('save-btn');
+  const remove = $('delete-btn');
+  const discard = $('discard-btn');
+  if (save) save.disabled = state.busy || !state.selected;
+  if (remove) remove.disabled = state.busy || !state.selected;
+  if (discard) discard.disabled = state.busy || !state.dirty;
 }
 
 function renderFileList() {
