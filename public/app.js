@@ -55,6 +55,14 @@ function quoteArg(arg) {
   return `'${String(arg).replace(/'/g, `'\\''`)}'`;
 }
 
+function failureText(error) {
+  const message = error?.message || 'Request failed';
+  if (error?.status === 413 && !message.includes('Reset sandbox')) {
+    return `${message} Use Reset sandbox to start over.`;
+  }
+  return message;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -161,7 +169,7 @@ async function boot() {
     loadEditor(false);
   } catch (error) {
     $('command-line').textContent = 'Could not start a sandbox';
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }
@@ -190,8 +198,8 @@ async function runCommand(command) {
       return;
     }
     $('command-line').textContent = trimmed;
-    $('summary').textContent = error.message;
-    $('console').textContent = error.message;
+    $('summary').textContent = failureText(error);
+    $('console').textContent = failureText(error);
     $('console').classList.add('fail');
   } finally {
     setBusy(false);
@@ -210,7 +218,7 @@ async function saveFile(filePath, content) {
     applyResult(result);
     loadEditor(true);
   } catch (error) {
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }
@@ -243,7 +251,7 @@ async function deleteSelected() {
     applyResult(result);
     loadEditor(true);
   } catch (error) {
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }
@@ -262,7 +270,7 @@ async function resetSandbox() {
     render();
     loadEditor(true);
   } catch (error) {
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }

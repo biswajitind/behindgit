@@ -3,11 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createApp } from '../server/app.js';
+import { createApp, retainSnapshot } from '../server/app.js';
 import { getConfig } from '../server/config.js';
 import { rateKey, rateLimit, sweepRateLimits } from '../server/httpguard.js';
-import { createSession, getSession } from '../server/sandbox.js';
-
+import { assertSandboxDisk, createSession, getSession } from '../server/sandbox.js';
 const sandboxRoot = mkdtempSync(path.join(os.tmpdir(), 'behindgit-guards-'));
 process.env.BEHINDGIT_SANDBOX_ROOT = sandboxRoot;
 process.env.BEHINDGIT_RATE_CREATE_PER_MIN = '2';
@@ -84,6 +83,12 @@ test('mutations require the app header, JSON, and a same-site fetch', { timeout:
 });
 
 test('create is rate limited, and a live session is not evicted to make room', { timeout: 60_000 }, async () => {
+  const saved = {
+    create: process.env.BEHINDGIT_RATE_CREATE_PER_MIN,
+    command: process.env.BEHINDGIT_RATE_COMMAND_PER_MIN,
+    max: process.env.BEHINDGIT_MAX_SESSIONS,
+    idle: process.env.BEHINDGIT_IDLE_EVICT_MS,
+  };
   const { server, port } = await listen(createApp());
   try {
     const first = await request(port, '/api/sessions', {
@@ -146,22 +151,88 @@ test('create is rate limited, and a live session is not evicted to make room', {
     assert.equal(again.status, 429);
   } finally {
     server.close();
+    process.env.BEHINDGIT_RATE_CREATE_PER_MIN = saved.create;
+    process.env.BEHINDGIT_RATE_COMMAND_PER_MIN = saved.command;
+    process.env.BEHINDGIT_MAX_SESSIONS = saved.max;
+    process.env.BEHINDGIT_IDLE_EVICT_MS = saved.idle;
   }
 });
 
+function saveEnv(names) {
+  const saved = {};
+  for (const name of names) saved[name] = process.env[name];
+  return {
+    set(name, value) {
+      process.env[name] = value;
+    },
+    async restore() {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    },
+  };
+}
+
+test('a live session is not replaced, and an idle one is', async () => {
+  const env = saveEnv([
+    'BEHINDGIT_MAX_SESSIONS',
+    'BEHINDGIT_MAX_SESSIONS_PER_CLIENT',
+    'BEHINDGIT_CLIENT_EVICT_MS',
+  ]);
+  env.set('BEHINDGIT_MAX_SESSIONS', '100');
+  env.set('BEHINDGIT_MAX_SESSIONS_PER_CLIENT', '2');
+  env.set('BEHINDGIT_CLIENT_EVICT_MS', '120000');
+  try {
+    const first = await createSession({ clientKey: 'alpha' });
+    const second = await createSession({ clientKey: 'alpha' });
+    await assert.rejects(() => createSession({ clientKey: 'alpha' }), /No idle sandbox/);
+    assert.equal(getSession(first.id).id, first.id);
+    assert.equal(getSession(second.id).id, second.id);
+    first.lastUsed = Date.now() - 130_000;
+    const third = await createSession({ clientKey: 'alpha' });
+    await assert.rejects(() => Promise.resolve().then(() => getSession(first.id)), /not found/);
+    assert.equal(getSession(second.id).id, second.id);
+    assert.equal(getSession(third.id).id, third.id);
+  } finally {
+    await env.restore();
+  }
 });
 
-test('one address cannot hold more than its session cap', async () => {
-  process.env.BEHINDGIT_MAX_SESSIONS = '10';
-  process.env.BEHINDGIT_MAX_SESSIONS_PER_CLIENT = '2';
-  const first = await createSession({ clientKey: 'alpha' });
-  const second = await createSession({ clientKey: 'alpha' });
-  const third = await createSession({ clientKey: 'alpha' });
-  await assert.rejects(() => Promise.resolve().then(() => getSession(first.id)), /not found/);
-  assert.equal(getSession(second.id).id, second.id);
-  assert.equal(getSession(third.id).id, third.id);
-  const other = await createSession({ clientKey: 'beta' });
-  assert.equal(getSession(other.id).id, other.id);
+test('replacing an idle session does not hold the create lock', async () => {
+  const env = saveEnv([
+    'BEHINDGIT_MAX_SESSIONS',
+    'BEHINDGIT_MAX_SESSIONS_PER_CLIENT',
+    'BEHINDGIT_CLIENT_EVICT_MS',
+    'BEHINDGIT_SAMPLE_PATH',
+  ]);
+  env.set('BEHINDGIT_MAX_SESSIONS', '100');
+  env.set('BEHINDGIT_MAX_SESSIONS_PER_CLIENT', '1');
+  env.set('BEHINDGIT_CLIENT_EVICT_MS', '0');
+  const source = mkdtempSync(path.join(os.tmpdir(), 'behindgit-lock-src-'));
+  let release = () => {};
+  let replacing = Promise.resolve();
+  try {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('git', ['init', '-q', '-b', 'main', source]);
+    env.set('BEHINDGIT_SAMPLE_PATH', source);
+    const held = await createSession({ clientKey: 'busy' });
+    held.queue = new Promise((resolve) => {
+      release = resolve;
+    });
+    held.lastUsed = 0;
+    replacing = createSession({ clientKey: 'busy' });
+    const other = await Promise.race([
+      createSession({ clientKey: 'other' }).then(() => 'done'),
+      new Promise((resolve) => setTimeout(() => resolve('blocked'), 2000)),
+    ]);
+    assert.equal(other, 'done');
+  } finally {
+    release();
+    await replacing.catch(() => {});
+    await env.restore();
+    rmSync(source, { recursive: true, force: true });
+  }
 });
 
 test('rate keys use an IPv6 /64 and empty buckets are dropped', () => {
@@ -183,10 +254,19 @@ test('rate keys use an IPv6 /64 and empty buckets are dropped', () => {
   delete process.env.BEHINDGIT_RATE_READ_PER_MIN;
 });
 
-test('a command is refused when the object store is over its cap', async () => {
-  process.env.BEHINDGIT_RATE_CREATE_PER_MIN = '1000';
-  process.env.BEHINDGIT_MAX_SESSIONS = '10';
-  process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES = '1';
+test('a full object store still allows status and tells you to reset', async () => {
+  const env = saveEnv([
+    'BEHINDGIT_RATE_CREATE_PER_MIN',
+    'BEHINDGIT_RATE_COMMAND_PER_MIN',
+    'BEHINDGIT_MAX_SESSIONS',
+    'BEHINDGIT_MAX_SESSIONS_PER_CLIENT',
+    'BEHINDGIT_SESSION_MAX_GIT_BYTES',
+  ]);
+  env.set('BEHINDGIT_RATE_CREATE_PER_MIN', '1000');
+  env.set('BEHINDGIT_RATE_COMMAND_PER_MIN', '1000');
+  env.set('BEHINDGIT_MAX_SESSIONS', '100');
+  env.set('BEHINDGIT_MAX_SESSIONS_PER_CLIENT', '20');
+  env.set('BEHINDGIT_SESSION_MAX_GIT_BYTES', '1');
   const { server, port } = await listen(createApp());
   try {
     const created = await request(port, '/api/sessions', {
@@ -195,16 +275,42 @@ test('a command is refused when the object store is over its cap', async () => {
       body: '{}',
     });
     assert.equal(created.status, 201);
-    const command = await request(port, `/api/sessions/${created.body.id}/command`, {
+    const status = await request(port, `/api/sessions/${created.body.id}/command`, {
       method: 'POST',
       headers: jsonHeaders(),
       body: JSON.stringify({ command: 'git status' }),
     });
-    assert.equal(command.status, 413);
+    assert.equal(status.status, 200);
+    const commit = await request(port, `/api/sessions/${created.body.id}/command`, {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ command: 'git commit -m "nope"' }),
+    });
+    assert.equal(commit.status, 413);
+    assert.match(commit.body.error, /Reset sandbox/);
   } finally {
-    delete process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES;
     server.close();
+    await env.restore();
   }
+});
+
+test('a failed object read is not cached, and a low disk floor refuses creates', async () => {
+  const session = { lastSnapshot: { kept: true } };
+  retainSnapshot(session, { readFailed: true, objects: {} });
+  assert.equal(session.lastSnapshot, null);
+  retainSnapshot(session, { readFailed: false, head: 1 });
+  assert.deepEqual(session.lastSnapshot, { readFailed: false, head: 1 });
+
+  const env = saveEnv(['BEHINDGIT_SANDBOX_MIN_FREE_BYTES', 'BEHINDGIT_MAX_SESSIONS']);
+  env.set('BEHINDGIT_SANDBOX_MIN_FREE_BYTES', '999999999999999');
+  env.set('BEHINDGIT_MAX_SESSIONS', '10');
+  try {
+    await assert.rejects(() => assertSandboxDisk(), /disk is full/);
+  } finally {
+    await env.restore();
+  }
+});
+
 });
 
 test.after(() => {

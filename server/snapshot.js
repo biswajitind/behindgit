@@ -529,6 +529,7 @@ export async function captureSnapshot(repo, hints = {}) {
     warnings.push(error instanceof Error ? error.message : 'Could not list objects');
   }
   let objectsTruncated = listFailed;
+  let readFailed = listFailed;
   if (listed.length > cfg.maxObjects) {
     objectsTruncated = true;
     warnings.push(`Object list truncated to ${cfg.maxObjects}`);
@@ -590,6 +591,7 @@ export async function captureSnapshot(repo, hints = {}) {
     rawObjects = await catBatch(repo, fetchIds);
   } catch (error) {
     objectsTruncated = true;
+    readFailed = true;
     warnings.push(error instanceof Error ? error.message : 'Could not read objects');
   }
   const commits = [];
@@ -633,6 +635,7 @@ export async function captureSnapshot(repo, hints = {}) {
     worktree: worktreeResult.files,
     worktreeTruncated: worktreeResult.truncated,
     objectsTruncated,
+    readFailed,
     warnings,
     objects: { commits, trees, blobs, tags },
     patches: { worktreeVsIndex: '', indexVsHead: '' },

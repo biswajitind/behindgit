@@ -9,6 +9,7 @@ import { requestContext } from './git.js';
 import { clientKey, rateLimit, requireSameOriginMutation } from './httpguard.js';
 import {
   assertGitQuota,
+  assertSandboxDisk,
   createSession,
   deleteWorktreeFile,
   enqueue,
@@ -51,18 +52,28 @@ function wrap(fn) {
   };
 }
 
-async function withTransition(session, label, mutate) {
+const READ_ONLY_GIT = new Set(['status', 'diff', 'log']);
+
+export function retainSnapshot(session, snapshot) {
+  session.lastSnapshot = snapshot?.readFailed ? null : structuredClone(snapshot);
+  return snapshot;
+}
+
+async function withTransition(session, label, mutate, options = {}) {
   return enqueue(session, async () => {
+    if (!options.skipGitQuota) {
+      await assertSandboxDisk();
+      await assertGitQuota(session.repo);
+    }
     const before = session.lastSnapshot
       ? structuredClone(session.lastSnapshot)
       : await captureSnapshot(session.repo);
-    await assertGitQuota(session.repo);
     const executed = await mutate();
     let after = null;
     let warning = null;
     try {
       after = await captureSnapshot(session.repo, { preferOids: preferOids(before) });
-      session.lastSnapshot = structuredClone(after);
+      retainSnapshot(session, after);
     } catch (error) {
       session.lastSnapshot = null;
       warning = error instanceof AppError ? error.message : 'Could not read the repository after the command';
@@ -95,7 +106,12 @@ export function createApp() {
   const app = express();
   app.disable('x-powered-by');
   if (getConfig().trustProxy) app.set('trust proxy', 1);
+  let warnedUntrustedForward = false;
   app.use((req, res, next) => {
+    if (!warnedUntrustedForward && !getConfig().trustProxy && req.headers['x-forwarded-for']) {
+      warnedUntrustedForward = true;
+      console.warn('X-Forwarded-For is present but BEHINDGIT_TRUST_PROXY is off. Rate limits and session caps use the socket address, so clients behind one proxy share a bucket.');
+    }
     res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -121,7 +137,7 @@ export function createApp() {
   app.post('/api/sessions', rateLimit('create'), wrap(async (req, res) => {
     const session = await createSession({ clientKey: clientKey(req) });
     const snapshot = await captureSnapshot(session.repo);
-    session.lastSnapshot = structuredClone(snapshot);
+    retainSnapshot(session, snapshot);
     res.status(201).json({
       id: session.id,
       sample: describeSample(),
@@ -133,8 +149,8 @@ export function createApp() {
     const session = getSession(req.params.id);
     const snapshot = await enqueue(session, async () => {
       if (session.lastSnapshot) return session.lastSnapshot;
-      const captured = await captureSnapshot(session.repo, { preferOids: preferOids(session.lastSnapshot) });
-      session.lastSnapshot = structuredClone(captured);
+      const captured = await captureSnapshot(session.repo);
+      retainSnapshot(session, captured);
       return captured;
     });
     res.json({ id: session.id, snapshot });
@@ -145,7 +161,7 @@ export function createApp() {
     const snapshot = await enqueue(session, async () => {
       await rebuildRepo(session);
       const captured = await captureSnapshot(session.repo);
-      session.lastSnapshot = structuredClone(captured);
+      retainSnapshot(session, captured);
       return captured;
     });
     res.json({
@@ -162,7 +178,7 @@ export function createApp() {
     const label = typeof command === 'string' ? command.trim() : '';
     const outcome = await withTransition(session, label, () => (
       executeGit(session.repo, command, { parsed })
-    ));
+    ), { skipGitQuota: READ_ONLY_GIT.has(parsed.argv[0]) });
     res.json(outcome);
   }));
 

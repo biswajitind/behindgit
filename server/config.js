@@ -29,8 +29,14 @@ export function getConfig() {
     sandboxTtlMs: intEnv('BEHINDGIT_SANDBOX_TTL_MS', 2 * 60 * 60 * 1000),
     commandTimeoutMs: intEnv('BEHINDGIT_COMMAND_TIMEOUT_MS', 15_000),
     cloneTimeoutMs: intEnv('BEHINDGIT_CLONE_TIMEOUT_MS', 60_000),
-    maxSessions: intEnv('BEHINDGIT_MAX_SESSIONS', 30),
+    // 20 sessions × (4 MB .git + 5 MB worktree) = 180 MB, under the 256 MB
+    // /sandboxes tmpfs. BEHINDGIT_SANDBOX_MIN_FREE_BYTES keeps a 32 MB floor
+    // so one command that overshoots a per-session check cannot fill the disk.
+    maxSessions: intEnv('BEHINDGIT_MAX_SESSIONS', 20),
     maxSessionsPerClient: intEnv('BEHINDGIT_MAX_SESSIONS_PER_CLIENT', 3),
+    // Own-session replacement waits until the sandbox has been idle this long.
+    // A shared NAT address then gets 429 instead of deleting someone else's lesson.
+    clientEvictMs: intEnv('BEHINDGIT_CLIENT_EVICT_MS', 2 * 60 * 1000),
     maxBlobBytes: intEnv('BEHINDGIT_MAX_BLOB_BYTES', 100_000),
     maxObjects: intEnv('BEHINDGIT_MAX_OBJECTS', 2500),
     maxFiles: intEnv('BEHINDGIT_MAX_FILES', 2000),
@@ -39,7 +45,8 @@ export function getConfig() {
     maxCloneConcurrency: intEnv('BEHINDGIT_MAX_CLONE_CONCURRENCY', 2),
     sessionMaxFiles: intEnv('BEHINDGIT_SESSION_MAX_FILES', 200),
     sessionMaxBytes: intEnv('BEHINDGIT_SESSION_MAX_BYTES', 5_000_000),
-    sessionMaxGitBytes: intEnv('BEHINDGIT_SESSION_MAX_GIT_BYTES', 32_000_000),
+    sessionMaxGitBytes: intEnv('BEHINDGIT_SESSION_MAX_GIT_BYTES', 4_000_000),
+    sandboxMinFreeBytes: intEnv('BEHINDGIT_SANDBOX_MIN_FREE_BYTES', 32 * 1024 * 1024),
     maxObjectBytes: intEnv('BEHINDGIT_MAX_OBJECT_BYTES', 8_000_000),
     requestDeadlineMs: intEnv('BEHINDGIT_REQUEST_DEADLINE_MS', 60_000),
     rateCreatePerMin: intEnv('BEHINDGIT_RATE_CREATE_PER_MIN', 10),
