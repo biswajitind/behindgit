@@ -1,6 +1,6 @@
 # Production image. Git is installed because BehindGit runs real git commands.
 # Digest pinned so a retagged node:22-bookworm-slim cannot change the build.
-FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
+FROM node:25-bookworm-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370
 
 # Upgrade before installing Git. The pinned base still ships apt 2.6.1
 # (CVE-2026-109518, fixed in 2.6.2). bookworm-security has the update.
