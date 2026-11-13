@@ -45,6 +45,8 @@ export function getConfig() {
     maxCloneConcurrency: intEnv('BEHINDGIT_MAX_CLONE_CONCURRENCY', 2),
     sessionMaxFiles: intEnv('BEHINDGIT_SESSION_MAX_FILES', 200),
     sessionMaxBytes: intEnv('BEHINDGIT_SESSION_MAX_BYTES', 5_000_000),
+    // Growth past the clone. The sample's objects are measured once and
+    // are not part of this cap, so a large custom sample can still be edited.
     sessionMaxGitBytes: intEnv('BEHINDGIT_SESSION_MAX_GIT_BYTES', 4_000_000),
     sandboxMinFreeBytes: intEnv('BEHINDGIT_SANDBOX_MIN_FREE_BYTES', 32 * 1024 * 1024),
     maxObjectBytes: intEnv('BEHINDGIT_MAX_OBJECT_BYTES', 8_000_000),

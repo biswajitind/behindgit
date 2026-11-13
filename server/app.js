@@ -63,7 +63,7 @@ async function withTransition(session, label, mutate, options = {}) {
   return enqueue(session, async () => {
     if (!options.skipGitQuota) {
       await assertSandboxDisk();
-      await assertGitQuota(session.repo);
+      await assertGitQuota(session.repo, session.gitBaselineBytes);
     }
     const before = session.lastSnapshot
       ? structuredClone(session.lastSnapshot)
