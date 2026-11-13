@@ -325,6 +325,7 @@ export async function createSession(options = {}) {
   const id = randomUUID();
   const dir = path.join(cfg.sandboxRoot, id);
   const repo = path.join(dir, 'repo');
+  let gitBaselineBytes;
   try {
     await acquireClone();
     try {
@@ -333,6 +334,7 @@ export async function createSession(options = {}) {
     } finally {
       releaseClone();
     }
+    gitBaselineBytes = await gitStoreBytes(repo);
   } catch (error) {
     releasePending(clientKey);
     await rm(dir, { recursive: true, force: true });
@@ -350,6 +352,7 @@ export async function createSession(options = {}) {
     pending: 0,
     closing: false,
     lastSnapshot: null,
+    gitBaselineBytes,
   };
   sessions.set(id, session);
   releasePending(clientKey);
@@ -370,6 +373,7 @@ export async function rebuildRepo(session) {
   session.lastSnapshot = null;
   await rm(session.repo, { recursive: true, force: true });
   await materialize(session.sample, session.repo);
+  session.gitBaselineBytes = await gitStoreBytes(session.repo);
   session.lastUsed = Date.now();
   return session;
 }
@@ -427,12 +431,13 @@ async function gitStoreBytes(repo) {
   return kib * 1024;
 }
 
-export async function assertGitQuota(repo) {
+export async function assertGitQuota(repo, baselineBytes = 0) {
   const cfg = getConfig();
   const bytes = await gitStoreBytes(repo);
-  if (bytes > cfg.sessionMaxGitBytes) {
-    const mb = (bytes / (1024 * 1024)).toFixed(1);
-    throw new AppError(`Session object store is full (${mb} MB). Use Reset sandbox to start over.`, 413);
+  const growth = Math.max(0, bytes - (Number(baselineBytes) || 0));
+  if (growth > cfg.sessionMaxGitBytes) {
+    const mb = (growth / (1024 * 1024)).toFixed(1);
+    throw new AppError(`Session object store is full (${mb} MB past the sample). Use Reset sandbox to start over.`, 413);
   }
 }
 

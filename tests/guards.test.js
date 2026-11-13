@@ -151,12 +151,17 @@ test('create is rate limited, and a live session is not evicted to make room', {
     assert.equal(again.status, 429);
   } finally {
     server.close();
-    process.env.BEHINDGIT_RATE_CREATE_PER_MIN = saved.create;
-    process.env.BEHINDGIT_RATE_COMMAND_PER_MIN = saved.command;
-    process.env.BEHINDGIT_MAX_SESSIONS = saved.max;
-    process.env.BEHINDGIT_IDLE_EVICT_MS = saved.idle;
+    restoreEnvVar('BEHINDGIT_RATE_CREATE_PER_MIN', saved.create);
+    restoreEnvVar('BEHINDGIT_RATE_COMMAND_PER_MIN', saved.command);
+    restoreEnvVar('BEHINDGIT_MAX_SESSIONS', saved.max);
+    restoreEnvVar('BEHINDGIT_IDLE_EVICT_MS', saved.idle);
   }
 });
+
+function restoreEnvVar(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 
 function saveEnv(names) {
   const saved = {};
@@ -166,13 +171,19 @@ function saveEnv(names) {
       process.env[name] = value;
     },
     async restore() {
-      for (const [name, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
+      for (const [name, value] of Object.entries(saved)) restoreEnvVar(name, value);
     },
   };
 }
+
+test('restoring an unset environment variable removes it', () => {
+  const name = 'BEHINDGIT_UNSET_RESTORE_PROBE';
+  delete process.env[name];
+  const saved = process.env[name];
+  process.env[name] = 'temporary';
+  restoreEnvVar(name, saved);
+  assert.equal(Object.hasOwn(process.env, name), false);
+});
 
 test('a live session is not replaced, and an idle one is', async () => {
   const env = saveEnv([
@@ -281,10 +292,22 @@ test('a full object store still allows status and tells you to reset', async () 
       body: JSON.stringify({ command: 'git status' }),
     });
     assert.equal(status.status, 200);
+    const written = await request(port, `/api/sessions/${created.body.id}/files`, {
+      method: 'PUT',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ path: 'notes.txt', content: 'notes from the lesson\n' }),
+    });
+    assert.equal(written.status, 200);
+    const added = await request(port, `/api/sessions/${created.body.id}/command`, {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ command: 'git add notes.txt' }),
+    });
+    assert.equal(added.status, 200);
     const commit = await request(port, `/api/sessions/${created.body.id}/command`, {
       method: 'POST',
       headers: jsonHeaders(),
-      body: JSON.stringify({ command: 'git commit -m "nope"' }),
+      body: JSON.stringify({ command: 'git commit -m "notes"' }),
     });
     assert.equal(commit.status, 413);
     assert.match(commit.body.error, /Reset sandbox/);
