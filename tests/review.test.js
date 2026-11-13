@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { executeGit } from '../server/commands.js';
 import { gitText, requestContext } from '../server/git.js';
-import { assertGitQuota, createSession, rebuildRepo, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
+import { assertGitQuota, closeSession, createSession, rebuildRepo, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
 import { captureSnapshot } from '../server/snapshot.js';
 
 const exec = promisify(execFile);
@@ -281,8 +281,9 @@ test('the object store quota ignores the cloned sample and counts later growth',
   const savedCap = process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES;
   process.env.BEHINDGIT_SAMPLE_PATH = source;
   process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES = '1';
+  let session;
   try {
-    const session = await createSession({ clientKey: 'quota-growth' });
+    session = await createSession({ clientKey: 'quota-growth' });
     assert.ok(session.gitBaselineBytes > 0);
     await assertGitQuota(session.repo, session.gitBaselineBytes);
     await writeFile(path.join(session.repo, 'more'), 'x'.repeat(4096));
@@ -294,6 +295,7 @@ test('the object store quota ignores the cloned sample and counts later growth',
     assert.equal(session.gitBaselineBytes, baseline);
     await assertGitQuota(session.repo, session.gitBaselineBytes);
   } finally {
+    if (session) await closeSession(session);
     if (savedPath === undefined) delete process.env.BEHINDGIT_SAMPLE_PATH;
     else process.env.BEHINDGIT_SAMPLE_PATH = savedPath;
     if (savedCap === undefined) delete process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES;

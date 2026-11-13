@@ -245,7 +245,7 @@ async function drainSession(session) {
   await rm(session.dir, { recursive: true, force: true });
 }
 
-async function closeSession(session) {
+export async function closeSession(session) {
   const claimed = claimSession(session);
   if (claimed) await drainSession(claimed);
 }
