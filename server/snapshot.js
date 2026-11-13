@@ -521,12 +521,15 @@ export async function captureSnapshot(repo, hints = {}) {
   const worktreeResult = await readWorktree(repo, statusEntries);
 
   let listed = [];
+  let listFailed = false;
   try {
     listed = await listObjects(repo);
   } catch (error) {
+    listFailed = true;
     warnings.push(error instanceof Error ? error.message : 'Could not list objects');
   }
-  let objectsTruncated = false;
+  let objectsTruncated = listFailed;
+  let readFailed = listFailed;
   if (listed.length > cfg.maxObjects) {
     objectsTruncated = true;
     warnings.push(`Object list truncated to ${cfg.maxObjects}`);
@@ -549,7 +552,10 @@ export async function captureSnapshot(repo, hints = {}) {
 
   const blobs = [];
   const fetchIds = [];
-  for (const obj of listed) {
+  const rank = { commit: 0, tag: 1, tree: 2, blob: 3 };
+  const ordered = [...listed].sort((a, b) => (rank[a.type] ?? 9) - (rank[b.type] ?? 9));
+  let budget = cfg.maxObjectBytes;
+  for (const obj of ordered) {
     if (obj.type === 'blob' && obj.size > cfg.maxBlobBytes) {
       blobs.push({
         oid: obj.oid,
@@ -561,6 +567,21 @@ export async function captureSnapshot(repo, hints = {}) {
       });
       continue;
     }
+    if (!Number.isFinite(obj.size) || obj.size > budget) {
+      objectsTruncated = true;
+      if (obj.type === 'blob') {
+        blobs.push({
+          oid: obj.oid,
+          type: 'blob',
+          size: obj.size,
+          binary: false,
+          truncated: true,
+          content: null,
+        });
+      }
+      continue;
+    }
+    budget -= obj.size;
     if (obj.type === 'blob' || obj.type === 'tree' || obj.type === 'commit' || obj.type === 'tag') {
       fetchIds.push(obj.oid);
     }
@@ -569,6 +590,8 @@ export async function captureSnapshot(repo, hints = {}) {
   try {
     rawObjects = await catBatch(repo, fetchIds);
   } catch (error) {
+    objectsTruncated = true;
+    readFailed = true;
     warnings.push(error instanceof Error ? error.message : 'Could not read objects');
   }
   const commits = [];
@@ -612,6 +635,7 @@ export async function captureSnapshot(repo, hints = {}) {
     worktree: worktreeResult.files,
     worktreeTruncated: worktreeResult.truncated,
     objectsTruncated,
+    readFailed,
     warnings,
     objects: { commits, trees, blobs, tags },
     patches: { worktreeVsIndex: '', indexVsHead: '' },

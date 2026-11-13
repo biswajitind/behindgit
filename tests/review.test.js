@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { executeGit } from '../server/commands.js';
 import { gitText, requestContext } from '../server/git.js';
-import { createSession, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
+import { assertGitQuota, createSession, resolveInside, writeWorktreeFile } from '../server/sandbox.js';
 import { captureSnapshot } from '../server/snapshot.js';
 
 const exec = promisify(execFile);
@@ -16,6 +16,8 @@ const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'behindgit-review-'));
 process.env.BEHINDGIT_SANDBOX_ROOT = sandboxRoot;
 process.env.BEHINDGIT_RATE_CREATE_PER_MIN = '1000';
 process.env.BEHINDGIT_RATE_COMMAND_PER_MIN = '1000';
+process.env.BEHINDGIT_MAX_SESSIONS = '100';
+process.env.BEHINDGIT_MAX_SESSIONS_PER_CLIENT = '100';
 
 async function git(repo, args, env = {}) {
   await exec('git', ['-C', repo, ...args], {
@@ -218,12 +220,79 @@ test('a request past its deadline does not start another git command', async () 
   );
 });
 
-test('sha256 samples are rejected', async () => {
+test('a slashed branch name resets to that revision', async () => {
+  const repo = await initRepo();
+  await writeFile(path.join(repo, 'a'), 'a\n');
+  await git(repo, ['add', 'a']);
+  await git(repo, ['commit', '-m', 'first']);
+  const first = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+  await git(repo, ['branch', 'feature/login']);
+  await writeFile(path.join(repo, 'b'), 'b\n');
+  await git(repo, ['add', 'b']);
+  await git(repo, ['commit', '-m', 'second']);
+  const result = await executeGit(repo, 'git reset feature/login');
+  assert.equal(result.exitCode, 0);
+  const head = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+  assert.equal(head, first);
+});
+
+test('an over-budget object read is truncated, not an empty snapshot', async () => {
+  const repo = await initRepo();
+  await writeFile(path.join(repo, 'big'), 'x'.repeat(800));
+  await git(repo, ['add', 'big']);
+  await git(repo, ['commit', '-m', 'big']);
+  process.env.BEHINDGIT_MAX_OBJECT_BYTES = '500';
+  try {
+    const snapshot = await captureSnapshot(repo);
+    assert.equal(snapshot.objectsTruncated, true);
+    assert.ok(snapshot.objects.commits.some((commit) => commit.message.includes('big')));
+  } finally {
+    delete process.env.BEHINDGIT_MAX_OBJECT_BYTES;
+  }
+});
+
+test('a failed object read is marked so it is not reused as a baseline', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'behindgit-not-a-repo-'));
+  dirs.push(dir);
+  const snapshot = await captureSnapshot(dir);
+  assert.equal(snapshot.readFailed, true);
+  assert.equal(snapshot.objects.commits.length, 0);
+});
+
+test('the object store quota rejects another command', async () => {
+  const repo = await initRepo();
+  await writeFile(path.join(repo, 'a'), 'a\n');
+  await git(repo, ['add', 'a']);
+  await git(repo, ['commit', '-m', 'a']);
+  process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES = '1';
+  try {
+    await assert.rejects(() => assertGitQuota(repo), /Reset sandbox/);
+  } finally {
+    delete process.env.BEHINDGIT_SESSION_MAX_GIT_BYTES;
+  }
+});
+
+test('command output redacts the sandbox root', async () => {
+  const session = await createSession();
+  const result = await executeGit(session.dir, 'git status');
+  assert.notEqual(result.exitCode, 0);
+  const text = `${result.stdout}\n${result.stderr}`;
+  assert.equal(text.includes(session.dir), false);
+  assert.match(text, /\[sandbox\]/);
+});
+
+test('sha256 samples are rejected', async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'behindgit-sha256-'));
   dirs.push(dir);
   try {
     await exec('git', ['init', '-q', '--object-format=sha256', '-b', 'main', dir]);
-  } catch {
+    await exec('git', ['-C', dir, 'config', 'user.email', 't@example.com']);
+    await exec('git', ['-C', dir, 'config', 'user.name', 'Tester']);
+    await writeFile(path.join(dir, 'a'), 'a\n');
+    await exec('git', ['-C', dir, 'add', 'a']);
+    await exec('git', ['-C', dir, 'commit', '-q', '-m', 'sha256']);
+  } catch (error) {
+    t.skip(`git cannot create a sha256 repo: ${error.message}`);
     return;
   }
   const saved = process.env.BEHINDGIT_SAMPLE_PATH;

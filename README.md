@@ -41,7 +41,7 @@ The production image is `ghcr.io/biswajitind/behindgit`. It is based on `node:22
 
 ```bash
 docker build -t behindgit .
-docker run --rm --init \
+docker run --rm \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --tmpfs /sandboxes:rw,nosuid,size=256m \
@@ -54,7 +54,7 @@ docker run --rm --init \
   behindgit
 ```
 
-`--init` is extra process reaping; the image already starts with `tini`, which forwards `SIGTERM` to Node. `HOST=0.0.0.0` inside the container is what makes the published port work. The `-p 127.0.0.1:8080:8080` binding is what keeps it off the host’s other interfaces. Sandboxes live in `BEHINDGIT_SANDBOX_ROOT` (`/sandboxes` in the image), so that directory needs to be writable; a tmpfs keeps session files off the image’s read-only root. `/tmp` holds Git’s private `HOME`.
+The image’s `tini` is PID 1 and forwards `SIGTERM` to Node, so the example does not pass `--init` (a second init makes `tini` warn that it is not PID 1). `HOST=0.0.0.0` inside the container is what makes the published port work. The `-p 127.0.0.1:8080:8080` binding is what keeps it off the host’s other interfaces. Sandboxes live in `BEHINDGIT_SANDBOX_ROOT` (`/sandboxes` in the image). The 256 MB tmpfs is sized for the defaults: 20 sessions × (4 MB object store + 5 MB worktree) = 180 MB, plus a 32 MB free-space floor (`BEHINDGIT_SANDBOX_MIN_FREE_BYTES`) so one command that overshoots a per-session check cannot fill the disk. `/tmp` holds Git’s private `HOME`.
 
 The image label `org.opencontainers.image.source` is `https://github.com/biswajitind/behindgit`, which links the GitHub Container Registry package to this repository. The package stays private until an owner changes its visibility.
 
@@ -99,7 +99,10 @@ Other knobs, all read on each request:
 | `BEHINDGIT_SANDBOX_ROOT` | `$TMPDIR/behindgit-sandboxes` (`/sandboxes` in the image) | Where session directories are created. |
 | `BEHINDGIT_SANDBOX_TTL_MS` | two hours | Delete a session that has been idle this long. |
 | `BEHINDGIT_IDLE_EVICT_MS` | 10 minutes | When the session cap is hit, only sessions idle at least this long can be evicted. A busier server returns 503 with `Retry-After` instead of dropping a live session. |
-| `BEHINDGIT_MAX_SESSIONS` | 30 | Cap on live sandboxes, including a create that has reserved a slot but not finished cloning. |
+| `BEHINDGIT_MAX_SESSIONS` | 20 | Cap on live sandboxes, including a create that has reserved a slot but not finished cloning. 20 × (4 MB + 5 MB) = 180 MB, which fits the 256 MB `/sandboxes` tmpfs. |
+| `BEHINDGIT_MAX_SESSIONS_PER_CLIENT` | 3 | Sandboxes one socket address may hold. Behind NAT that address is shared. A further create replaces one of that address's sandboxes only after it has been idle for `BEHINDGIT_CLIENT_EVICT_MS`; otherwise the create returns 429. |
+| `BEHINDGIT_CLIENT_EVICT_MS` | 2 minutes | How long one of your own sandboxes must be idle before a new create may replace it. |
+| `BEHINDGIT_SANDBOX_MIN_FREE_BYTES` | 33554432 | Refuse a new sandbox or a writing command when the sandbox filesystem has less than this free. |
 | `BEHINDGIT_MAX_CLONE_CONCURRENCY` | 2 | How many sample clones run at once. |
 | `BEHINDGIT_CLONE_TIMEOUT_MS` | 60 seconds | Timeout for materializing the sample. |
 | `BEHINDGIT_COMMAND_TIMEOUT_MS` | 15 seconds | Timeout for one Git command. |
@@ -107,10 +110,14 @@ Other knobs, all read on each request:
 | `BEHINDGIT_QUEUE_LIMIT` | 5 | Queued commands per session. Further commands get 429. |
 | `BEHINDGIT_RATE_CREATE_PER_MIN` | 10 | New sandboxes per client address per minute. |
 | `BEHINDGIT_RATE_COMMAND_PER_MIN` | 60 | Commands and file writes per client address per minute. |
+| `BEHINDGIT_RATE_READ_PER_MIN` | 60 | Snapshot reads per client address per minute. |
+| `BEHINDGIT_TRUST_PROXY` | unset | Set to `1` only behind a reverse proxy you trust to set `X-Forwarded-For`. Otherwise the limit uses the socket address, so the process should be reached directly. IPv6 keys are the /64. |
 | `BEHINDGIT_SESSION_MAX_FILES` | 200 | Worktree files in one session. |
-| `BEHINDGIT_SESSION_MAX_BYTES` | 5000000 | Worktree bytes in one session. |
+| `BEHINDGIT_SESSION_MAX_BYTES` | 5000000 | Worktree bytes in one session. `.git` is not included. |
+| `BEHINDGIT_SESSION_MAX_GIT_BYTES` | 4000000 | Object-store bytes (`git count-objects` size + size-pack) in one session. A writing command is refused with 413, and the message says to use Reset sandbox. `git status`, `git diff`, and `git log` still run. |
 | `BEHINDGIT_MAX_BLOB_BYTES` | 100000 | Blobs larger than this are described (`size`, `truncated`) and not loaded. |
 | `BEHINDGIT_MAX_OBJECTS` | 2500 | Object-store cap. Past it, the snapshot keeps reachable objects first and sets `objectsTruncated` so the diff does not pretend the rest were deleted. |
+| `BEHINDGIT_MAX_OBJECT_BYTES` | 8000000 | Bytes of object content loaded for one snapshot. Past it, further objects stay metadata and `objectsTruncated` is set. A failed object read does the same, so it is not shown as deletions. |
 | `BEHINDGIT_MAX_FILES` | 2000 | Worktree walk cap. The walk stops instead of continuing through the rest of the tree. |
 
 **Reset sandbox** throws away the session directory and clones the sample again.

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, readlink, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readlink, realpath, rm, statfs, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertSafePath } from './allowlist.js';
 import { describeSample, getConfig } from './config.js';
@@ -11,6 +11,7 @@ import { gitText } from './git.js';
 const sessions = new Map();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 let pendingCreates = 0;
+const pendingByClient = new Map();
 let clonesInFlight = 0;
 const cloneWaiters = [];
 let slotGate = Promise.resolve();
@@ -191,6 +192,10 @@ async function materialize(sample, repo) {
   } else if (sample.kind === 'url') {
     await gitText(null, ['clone', '--quiet', sample.url, repo], { timeout: cfg.cloneTimeoutMs });
   } else {
+    const sourceFormat = await gitText(sample.path, ['rev-parse', '--show-object-format'], { allowNonZero: true });
+    if (sourceFormat.exitCode === 0 && sourceFormat.stdout.trim() !== 'sha1') {
+      throw new AppError(`Only SHA-1 repositories are supported (this sample is ${sourceFormat.stdout.trim()})`, 500);
+    }
     await gitText(null, ['clone', '--no-local', '--no-hardlinks', '--quiet', sample.path, repo], {
       timeout: cfg.cloneTimeoutMs,
     });
@@ -224,10 +229,14 @@ export function enqueue(session, fn) {
   });
 }
 
-async function closeSession(session) {
-  if (!session || session.closing) return;
+function claimSession(session) {
+  if (!session || session.closing) return null;
   session.closing = true;
   sessions.delete(session.id);
+  return session;
+}
+
+async function drainSession(session) {
   try {
     await session.queue;
   } catch {
@@ -236,29 +245,82 @@ async function closeSession(session) {
   await rm(session.dir, { recursive: true, force: true });
 }
 
-async function evictIdleToFit(cfg) {
-  const now = Date.now();
-  const idle = [...sessions.values()]
-    .filter((session) => !session.closing && now - session.lastUsed >= cfg.idleEvictMs)
-    .sort((a, b) => a.lastUsed - b.lastUsed);
-  while (sessions.size + pendingCreates >= cfg.maxSessions && idle.length) {
-    await closeSession(idle.shift());
-  }
+async function closeSession(session) {
+  const claimed = claimSession(session);
+  if (claimed) await drainSession(claimed);
 }
 
-export async function createSession() {
+// Mark victims only. The caller drains them after withSlot returns, so a
+// busy queue cannot stall every other create.
+function ownIdleVictims(cfg, clientKey) {
+  const now = Date.now();
+  const own = sessionsFor(clientKey);
+  const pending = pendingByClient.get(clientKey) || 0;
+  const chosen = [];
+  while (own.length - chosen.length + pending >= cfg.maxSessionsPerClient) {
+    const oldest = own[chosen.length];
+    if (!oldest || now - oldest.lastUsed < cfg.clientEvictMs) break;
+    chosen.push(oldest);
+  }
+  return chosen.map(claimSession).filter(Boolean);
+}
+
+function globalIdleVictims(cfg) {
+  const now = Date.now();
+  const victims = [];
+  while (sessions.size + pendingCreates >= cfg.maxSessions) {
+    const idle = [...sessions.values()]
+      .filter((session) => !session.closing && now - session.lastUsed >= cfg.idleEvictMs)
+      .sort((a, b) => a.lastUsed - b.lastUsed);
+    if (!idle.length) break;
+    const claimed = claimSession(idle[0]);
+    if (claimed) victims.push(claimed);
+  }
+  return victims;
+}
+
+function sessionsFor(clientKey) {
+  return [...sessions.values()]
+    .filter((session) => !session.closing && session.clientKey === clientKey)
+    .sort((a, b) => a.lastUsed - b.lastUsed);
+}
+
+function releasePending(clientKey) {
+  pendingCreates -= 1;
+  const left = (pendingByClient.get(clientKey) || 1) - 1;
+  if (left <= 0) pendingByClient.delete(clientKey);
+  else pendingByClient.set(clientKey, left);
+}
+
+export async function createSession(options = {}) {
   const cfg = getConfig();
+  const clientKey = options.clientKey || 'local';
   await mkdir(cfg.sandboxRoot, { recursive: true });
+  await assertSandboxDisk();
   const sample = resolveSample(cfg);
-  await withSlot(async () => {
-    await evictIdleToFit(cfg);
-    if (sessions.size + pendingCreates >= cfg.maxSessions) {
-      const error = new AppError('Too many active sessions. Try again shortly.', 503);
-      error.retryAfter = 30;
-      throw error;
-    }
-    pendingCreates += 1;
-  });
+  const victims = [];
+  try {
+    await withSlot(async () => {
+      victims.push(...ownIdleVictims(cfg, clientKey));
+      if (sessionsFor(clientKey).length + (pendingByClient.get(clientKey) || 0) >= cfg.maxSessionsPerClient) {
+        const error = new AppError('Too many sandboxes for this client. No idle sandbox to replace yet.', 429);
+        error.retryAfter = Math.max(1, Math.ceil(cfg.clientEvictMs / 1000));
+        throw error;
+      }
+      victims.push(...globalIdleVictims(cfg));
+      if (sessions.size + pendingCreates >= cfg.maxSessions) {
+        const error = new AppError('Too many active sessions. Try again shortly.', 503);
+        error.retryAfter = 30;
+        throw error;
+      }
+      pendingCreates += 1;
+      pendingByClient.set(clientKey, (pendingByClient.get(clientKey) || 0) + 1);
+    });
+  } catch (error) {
+    await Promise.allSettled(victims.map(drainSession));
+    throw error;
+  }
+  await Promise.allSettled(victims.map(drainSession));
 
   const id = randomUUID();
   const dir = path.join(cfg.sandboxRoot, id);
@@ -272,7 +334,7 @@ export async function createSession() {
       releaseClone();
     }
   } catch (error) {
-    pendingCreates -= 1;
+    releasePending(clientKey);
     await rm(dir, { recursive: true, force: true });
     throw error;
   }
@@ -281,6 +343,7 @@ export async function createSession() {
     dir,
     repo,
     sample,
+    clientKey,
     createdAt: Date.now(),
     lastUsed: Date.now(),
     queue: Promise.resolve(),
@@ -289,7 +352,7 @@ export async function createSession() {
     lastSnapshot: null,
   };
   sessions.set(id, session);
-  pendingCreates -= 1;
+  releasePending(clientKey);
   return session;
 }
 
@@ -332,6 +395,45 @@ async function worktreeUsage(repo) {
   }
   await walk(repo);
   return { bytes, files };
+}
+
+export async function assertSandboxDisk() {
+  const cfg = getConfig();
+  let stats;
+  try {
+    stats = await statfs(cfg.sandboxRoot);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  const free = Number(stats.bavail) * Number(stats.bsize);
+  if (free < cfg.sandboxMinFreeBytes) {
+    const error = new AppError('Sandbox disk is full. Try again shortly.', 507);
+    error.retryAfter = 30;
+    throw error;
+  }
+}
+
+async function gitStoreBytes(repo) {
+  const result = await gitText(repo, ['count-objects', '-v'], { allowNonZero: true });
+  if (result.exitCode !== 0) {
+    throw new AppError(result.stderr.trim() || 'Could not measure the object store', 500);
+  }
+  let kib = 0;
+  for (const line of result.stdout.split('\n')) {
+    const match = /^(?:size|size-pack): (\d+)$/.exec(line.trim());
+    if (match) kib += Number(match[1]);
+  }
+  return kib * 1024;
+}
+
+export async function assertGitQuota(repo) {
+  const cfg = getConfig();
+  const bytes = await gitStoreBytes(repo);
+  if (bytes > cfg.sessionMaxGitBytes) {
+    const mb = (bytes / (1024 * 1024)).toFixed(1);
+    throw new AppError(`Session object store is full (${mb} MB). Use Reset sandbox to start over.`, 413);
+  }
 }
 
 export async function assertWorktreeQuota(repo, full, nextBytes) {

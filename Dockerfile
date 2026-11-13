@@ -2,7 +2,10 @@
 # Digest pinned so a retagged node:22-bookworm-slim cannot change the build.
 FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 
+# Upgrade before installing Git. The pinned base still ships apt 2.6.1
+# (CVE-2026-109518, fixed in 2.6.2). bookworm-security has the update.
 RUN apt-get update \
+  && apt-get upgrade -y --no-install-recommends \
   && apt-get install -y --no-install-recommends git ca-certificates tini \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /sandboxes \

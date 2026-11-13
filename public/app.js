@@ -31,6 +31,7 @@ const state = {
   closed: new Set(),
   diffTab: 'commit',
   diffSide: 'after',
+  focusId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -52,6 +53,14 @@ function short(oid) {
 function quoteArg(arg) {
   if (/^[A-Za-z0-9._~/@:=+-]+$/.test(arg)) return arg;
   return `'${String(arg).replace(/'/g, `'\\''`)}'`;
+}
+
+function failureText(error) {
+  const message = error?.message || 'Request failed';
+  if (error?.status === 413 && !message.includes('Reset sandbox')) {
+    return `${message} Use Reset sandbox to start over.`;
+  }
+  return message;
 }
 
 async function api(path, options = {}) {
@@ -117,10 +126,21 @@ function chooseTab(view) {
 }
 
 function setBusy(busy) {
+  if (busy && !state.busy) {
+    const active = document.activeElement;
+    state.focusId = active && active.id ? active.id : null;
+  }
   state.busy = busy;
-  document.querySelectorAll('button, input, textarea').forEach((el) => {
-    el.disabled = busy;
+  document.querySelectorAll('button').forEach((button) => {
+    if (button.id === 'save-btn' || button.id === 'delete-btn' || button.id === 'discard-btn') return;
+    button.disabled = busy;
   });
+  renderEditorState();
+  if (!busy && state.focusId) {
+    const el = document.getElementById(state.focusId);
+    state.focusId = null;
+    if (el && !el.disabled) el.focus();
+  }
 }
 
 async function boot() {
@@ -149,7 +169,7 @@ async function boot() {
     loadEditor(false);
   } catch (error) {
     $('command-line').textContent = 'Could not start a sandbox';
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }
@@ -178,8 +198,8 @@ async function runCommand(command) {
       return;
     }
     $('command-line').textContent = trimmed;
-    $('summary').textContent = error.message;
-    $('console').textContent = error.message;
+    $('summary').textContent = failureText(error);
+    $('console').textContent = failureText(error);
     $('console').classList.add('fail');
   } finally {
     setBusy(false);
@@ -198,7 +218,7 @@ async function saveFile(filePath, content) {
     applyResult(result);
     loadEditor(true);
   } catch (error) {
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }
@@ -231,7 +251,7 @@ async function deleteSelected() {
     applyResult(result);
     loadEditor(true);
   } catch (error) {
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }
@@ -250,7 +270,7 @@ async function resetSandbox() {
     render();
     loadEditor(true);
   } catch (error) {
-    $('summary').textContent = error.message;
+    $('summary').textContent = failureText(error);
   } finally {
     setBusy(false);
   }
@@ -304,7 +324,14 @@ function renderEditorState() {
   const bits = [state.selected || 'no file'];
   if (file?.statusLabel && file.statusLabel !== 'clean') bits.push(file.statusLabel);
   if (state.dirty) bits.push('unsaved');
-  $('editor-state').textContent = bits.join(' · ');
+  const label = $('editor-state');
+  if (label) label.textContent = bits.join(' · ');
+  const save = $('save-btn');
+  const remove = $('delete-btn');
+  const discard = $('discard-btn');
+  if (save) save.disabled = state.busy || !state.selected;
+  if (remove) remove.disabled = state.busy || !state.selected;
+  if (discard) discard.disabled = state.busy || !state.dirty;
 }
 
 function renderFileList() {
